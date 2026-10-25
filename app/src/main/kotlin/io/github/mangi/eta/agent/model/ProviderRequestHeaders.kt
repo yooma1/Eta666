@@ -15,9 +15,9 @@ internal object ProviderRequestHeaders {
         baseUrl: String,
         customHeaders: List<CustomHeader>,
         sessionId: String = UUID.randomUUID().toString(),
-        sourceType: String = "",
         authMode: String = ProviderAuthModes.API_KEY,
         model: String? = null,
+        sourceType: String = "",
     ) {
         val profile = ProviderConnectionProfile.forAuthMode(authMode)
         if (profile != null) {
