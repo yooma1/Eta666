@@ -3,8 +3,6 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
-import io.github.mangi.eta.data.model.ProviderSourceTypes
-import io.github.mangi.eta.data.repository.OpenCodeEmbeddedGateway
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -36,7 +34,6 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         require(config.openAiEndpointMode == OpenAiEndpointMode.RESPONSES) {
             "当前 Provider 未配置为 Responses API"
         }
-        OpenCodeEmbeddedGateway.ensureRunningFor(config)
         val body = buildRequestJson(config, request.messages, request.effectiveTools)
             .toString()
             .toRequestBody(JSON_MEDIA_TYPE)
@@ -48,8 +45,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             }
             .also {
                 ProviderRequestHeaders.mergeInto(
-                    it, config.baseUrl, config.customHeaders,
-                    request.sessionId, config.providerSourceType,
+                    it, config.baseUrl, config.customHeaders, request.sessionId, config.authMode,
                 )
             }
             .build()
@@ -58,43 +54,26 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             .headers(headers)
             .post(body)
             .build()
-        val call = AgentHttpClient.modelClient(request.purpose).newCall(httpRequest)
-        val binding = runController.register(call::cancel)
-
-        try {
-            runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
-            call.execute().use { response ->
-                onEvent(ProviderEvent.ResponseHeaders(response.code))
-                runController.throwIfCancelled()
-                if (!response.isSuccessful) {
-                    val errorBody = response.peekBody(16_384).string()
-                    if (response.code == 502 && OpenCodeEmbeddedGateway.isEmbeddedConfig(config)) {
-                        throw AgentModelFailure.embeddedOpenCode502(
-                            errorBody,
-                            OpenCodeEmbeddedGateway.recentGatewayFailureHint(),
-                            OpenCodeEmbeddedGateway.upstreamProxyDescription(),
-                        )
-                    }
-                    throw AgentModelFailure.http(
-                        response.code, errorBody,
-                        config.providerSourceType.takeIf { it == ProviderSourceTypes.OPENCODE },
-                    )
-                }
-                val assistant = readStreamingResponse(
-                    stream = response.body.byteStream(),
-                    runController = runController,
-                    onEvent = onEvent,
-                )
-                onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistant)
+        runController.throwIfCancelled()
+        onEvent(ProviderEvent.RequestStarted)
+        return AuthorizedProviderHttp.execute(
+            client = AgentHttpClient.modelClient(request.purpose),
+            providerId = config.providerId,
+            authMode = config.authMode,
+            request = httpRequest,
+            controller = runController,
+        ) { response ->
+            onEvent(ProviderEvent.ResponseHeaders(response.code))
+            if (!response.isSuccessful) {
+                throw AgentModelFailure.http(response.code, response.peekBody(16_384).string())
             }
-        } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
-            throw throwable
-        } finally {
-            binding.close()
+            val assistant = readStreamingResponse(
+                stream = response.body.byteStream(),
+                runController = runController,
+                onEvent = onEvent,
+            )
+            onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))
+            ProviderResponse(assistant)
         }
     }
 
@@ -104,7 +83,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
         tools: JSONArray,
     ): JSONObject = ResponsesRequestBuilder.build(config, messages, tools)
 
-    private fun readStreamingResponse(
+    internal fun readStreamingResponse(
         stream: java.io.InputStream?,
         runController: AgentRunController,
         onEvent: (ProviderEvent) -> Unit,
@@ -353,9 +332,16 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                     val itemId = event.hostedToolId("web_search")
                     finishHostedTool(itemId, "网页搜索", success = false)
                 }
-                "response.completed", "response.incomplete", "response.failed" -> {
-                    terminalType = type
+                "response.completed", "response.done", "response.incomplete", "response.failed" -> {
                     terminal = event.optJSONObject("response") ?: event
+                    terminalType = if (type == "response.done") {
+                        when (terminal.optString("status")) {
+                            "completed" -> "response.completed"
+                            "failed" -> "response.failed"
+                            "incomplete" -> "response.incomplete"
+                            else -> throw AgentModelFailure.incompleteStream("Codex 终止事件缺少有效状态")
+                        }
+                    } else type
                 }
                 "error" -> throwTopLevelEventError(event)
             }
@@ -537,7 +523,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                                 partIndex = contentIndex,
                             ),
                             rawContent = partText,
-                            content = ResponsesCitationFormatter.apply(partText, localAnnotations),
+                            content = CitationFormatter.apply(partText, localAnnotations),
                         )
                     }
                 }
@@ -594,7 +580,7 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             }
         }
         return FinalOutput(
-            text = ResponsesCitationFormatter.apply(text.toString(), annotations),
+            text = CitationFormatter.apply(text.toString(), annotations),
             rawText = text.toString(),
             reasoning = reasoning.toString(),
             toolCalls = calls,

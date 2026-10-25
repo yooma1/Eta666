@@ -18,10 +18,8 @@ internal class AgentContextCompactor(
         sensitiveIds: Set<String>,
     ): JSONArray {
         controller.throwIfCancelled()
-        if (config.bindsAnthropicSignatures() &&
-            AnthropicEphemeralState.hasPendingToolResponse(messages)
-        ) {
-            throw signedAnthropicToolRoundFailure()
+        if (config.signedToolRoundLocked(messages)) {
+            throw SignedToolContext.compactionFailure(messages)
         }
         val history = (systemCount until messages.length()).map { messages.getJSONObject(it) }
         val latestUser = history.indexOfLast {
@@ -63,7 +61,9 @@ internal class AgentContextCompactor(
             val withoutResponsesItems = if (ResponsesEphemeralState.outputItems(message) != null) {
                 AgentConversationCodec.toJsonObject(AgentConversationCodec.fromJsonObject(message))
             } else message
-            result.put(AnthropicEphemeralState.withoutContentBlocks(withoutResponsesItems))
+            result.put(GeminiEphemeralState.withoutState(
+                AnthropicEphemeralState.withoutContentBlocks(withoutResponsesItems),
+            ))
         }
         // 同样逐条累加：两侧口径一致即可判定"是否变小"，不必各物化一次整段 JSON。
         if (jsonChars(result) >= jsonChars(messages)) {
@@ -85,11 +85,6 @@ internal class AgentContextCompactor(
     }
 
     companion object {
-        fun signedAnthropicToolRoundFailure() = failure(
-            "ANTHROPIC_THINKING_CONTEXT_LOCKED",
-            "当前 Anthropic 工具回合的思考签名绑定原始上下文，提交工具结果前无法压缩上下文。",
-        )
-
         /**
          * 找最靠后的可切分点。
          *
@@ -140,3 +135,13 @@ internal class AgentContextCompactor(
  */
 internal fun AgentModelClient.ModelConfig.bindsAnthropicSignatures(): Boolean =
     providerType == ProviderTypes.ANTHROPIC
+
+/**
+ * 签名工具回合是否仍锁定上下文。
+ *
+ * Gemini 的签名/思考状态始终随请求发送，因此与上游一致，任何 provider 下都锁定；
+ * Anthropic 只在当前请求真的携带签名块（[bindsAnthropicSignatures]）时锁定。
+ */
+internal fun AgentModelClient.ModelConfig.signedToolRoundLocked(messages: JSONArray): Boolean =
+    GeminiEphemeralState.hasPendingToolResponse(messages) ||
+        (bindsAnthropicSignatures() && AnthropicEphemeralState.hasPendingToolResponse(messages))

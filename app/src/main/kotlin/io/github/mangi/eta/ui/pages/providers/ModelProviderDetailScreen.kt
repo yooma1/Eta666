@@ -13,10 +13,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -32,23 +30,18 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.data.model.GeminiProviderSetting
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
-import io.github.mangi.eta.data.model.ProviderSourceTypes
-import io.github.mangi.eta.data.provider.BuiltinProviders
-import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import io.github.mangi.eta.data.model.withId
 import io.github.mangi.eta.data.repository.ProviderRepository
-import io.github.mangi.eta.data.repository.OpenCodeEmbeddedGateway
 import io.github.mangi.eta.data.repository.RemoteModelFetcher
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.components.EtaCard
@@ -58,7 +51,6 @@ import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
 import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaSwitchPreference
 import io.github.mangi.eta.ui.components.EtaTextButton
-import io.github.mangi.eta.ui.components.EtaWindowSpinnerPreference
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.MiuixPageBottomSpacer
 import io.github.mangi.eta.ui.components.MiuixScaffold
@@ -69,13 +61,8 @@ import io.github.mangi.eta.ui.layout.horizontalCutoutPadding
 import io.github.mangi.eta.ui.navigation.NewProviderType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
-import top.yukonga.miuix.kmp.basic.DropdownItem
-import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
@@ -110,6 +97,10 @@ internal fun ModelProviderDetailScreen(
                 id = "",
                 name = "",
                 baseUrl = "https://api.anthropic.com",
+            )
+            NewProviderType.Gemini -> GeminiProviderSetting(
+                id = "",
+                name = "",
             )
             null -> null
         }
@@ -209,23 +200,34 @@ private fun ProviderConfigTab(
 ) {
     val context = LocalContext.current
     var headersExpanded by rememberSaveable { mutableStateOf(false) }
-    var apiKeyVisible by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var testStatus by remember { mutableStateOf<String?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     var isWorking by remember { mutableStateOf(false) }
     var creationCommitted by remember { mutableStateOf(false) }
-    val hasEmbeddedOpenCode = provider.id == BuiltinProviders.OPENCODE_ID
-    var localOpenCode by remember(provider.id) {
-        mutableStateOf(hasEmbeddedOpenCode && OpenCodeEmbeddedGateway.enabled())
+    // 只恢复中断提示；回调监听、验证码和授权 URL 随登录会话销毁。
+    var loginInProgress by rememberSaveable(provider.id) { mutableStateOf(false) }
+    var pendingInterruption by remember(provider.id) { mutableStateOf(loginInProgress) }
+    val loginStore = remember(provider.id, scope) { ProviderLoginStore(provider.id, scope) }
+    val loginState by loginStore.state.collectAsState()
+    var browserError by remember(loginState.prompt) { mutableStateOf<String?>(null) }
+    val openBrowser: () -> Unit = {
+        loginState.prompt?.let { browserError = openProviderAccountLink(context, it.authorizationUrl) }
     }
-    var localGatewayBusy by remember { mutableStateOf(false) }
-    var localGatewayStatus by remember { mutableStateOf<String?>(null) }
-    var localZenKey by remember(provider.id) { mutableStateOf(if (hasEmbeddedOpenCode) OpenCodeEmbeddedGateway.zenKey() else "") }
-    var localGoKey by remember(provider.id) { mutableStateOf(if (hasEmbeddedOpenCode) OpenCodeEmbeddedGateway.goKey() else "") }
-    var localUpstreamProxy by remember(provider.id) {
-        mutableStateOf(if (hasEmbeddedOpenCode) OpenCodeEmbeddedGateway.upstreamProxy() else "")
+    DisposableEffect(loginStore) {
+        onDispose { loginStore.close() }
+    }
+    LaunchedEffect(loginStore, draft.authMode, provider.authMode) {
+        loginStore.load(draft.authMode, interrupted = pendingInterruption)
+        pendingInterruption = false
+    }
+    LaunchedEffect(loginState.phase) {
+        loginInProgress = loginState.phase == ProviderLoginPhase.Saving || loginState.phase == ProviderLoginPhase.Authorizing
+    }
+    LaunchedEffect(loginState.prompt) {
+        val prompt = loginState.prompt
+        if (prompt != null && prompt.userCode == null) openBrowser()
     }
 
     LazyColumn(
@@ -244,261 +246,31 @@ private fun ProviderConfigTab(
     ) {
         item(key = "connection") {
             ProviderSection(title = stringResource(R.string.ui_connection_configuration_7d057b)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    TextField(
-                        value = draft.name,
-                        onValueChange = { onDraftChange(draft.copy(name = it)) },
-                        label = stringResource(R.string.ui_name_1be7ae),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    TextField(
-                        value = draft.baseUrl,
-                        onValueChange = { onDraftChange(draft.copy(baseUrl = it)) },
-                        label = "Base URL",
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    TextField(
-                        value = draft.apiKey,
-                        onValueChange = { onDraftChange(draft.copy(apiKey = it)) },
-                        label = "API Key",
-                        singleLine = true,
-                        visualTransformation = if (apiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
-                                Icon(
-                                    imageVector = if (apiKeyVisible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
-                                    contentDescription = if (apiKeyVisible) context.getString(R.string.page_hide_bb0e7e) else context.getString(R.string.page_show_71b677),
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = if (hasEmbeddedOpenCode) {
-                                "上面的 Base URL / API Key 是外部 API 备用配置；切换到外部模式后生效。" +
-                                    "本地模式使用手机内置网关、随机访问密钥及 127.0.0.1。" +
-                                    "上游是否允许免费推理仍取决于 OpenCode 的实际授权。"
-                            } else {
-                                "自建 opencode2api 网关请使用 HTTPS /v1 地址及其 server_key。" +
-                                    "模型目录公开不代表免费推理已获授权。"
-                            },
-                            style = MiuixTheme.textStyles.footnote1,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        )
-                    }
-                    if (provider is AnthropicProviderSetting) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        TextField(
-                            value = draft.anthropicVersion,
-                            onValueChange = { onDraftChange(draft.copy(anthropicVersion = it)) },
-                            label = "anthropic-version",
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
-                if (hasEmbeddedOpenCode) {
-                    EtaPreferenceDivider(hasLeading = false)
-                    EtaSwitchPreference(
-                        title = "手机内置 opencode2api 网关",
-                        summary = "默认开启：网关在本机 127.0.0.1 运行，无需 VPS；关闭即使用上方填写的外部 API 配置",
-                        checked = localOpenCode,
-                        enabled = !isWorking && !localGatewayBusy,
-                        onCheckedChange = { selected ->
-                            scope.launch {
-                                localGatewayBusy = true
-                                try {
-                                    withContext(Dispatchers.IO) {
-                                        OpenCodeEmbeddedGateway.setEnabled(selected)
-                                    }
-                                    localOpenCode = selected
-                                    RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
-                                    localGatewayStatus = if (selected) {
-                                        "已选择本地模式，首次调用会自动启动网关"
-                                    } else "已切换外部 API，保留原地址和 Key"
-                                } catch (e: Exception) {
-                                    localGatewayStatus = "切换失败：${e.message ?: e.javaClass.simpleName}"
-                                } finally {
-                                    localGatewayBusy = false
-                                }
-                            }
-                        },
-                    )
-                    if (localOpenCode) {
-                        EtaPreferenceDivider(hasLeading = false)
-                        EtaPreference(
-                            title = if (localGatewayBusy) "正在启动并检查服务…" else "启动并检测本地网关",
-                            summary = localGatewayStatus ?: OpenCodeEmbeddedGateway.status(),
-                            enabled = !localGatewayBusy,
-                            onClick = {
-                                scope.launch {
-                                    localGatewayBusy = true
-                                    localGatewayStatus = "正在启动 Android ARM64 本地服务…"
-                                    try {
-                                        localGatewayStatus = withContext(Dispatchers.IO) {
-                                            OpenCodeEmbeddedGateway.ensureRunning()
-                                            OpenCodeEmbeddedGateway.catalogueReadiness() +
-                                                "；上游出口：" + OpenCodeEmbeddedGateway.upstreamProxyDescription()
-                                        }
-                                    } catch (e: Exception) {
-                                        localGatewayStatus = "启动失败：${e.message ?: e.javaClass.simpleName}"
-                                    } finally {
-                                        localGatewayBusy = false
-                                    }
-                                }
-                            },
-                        )
-                        EtaPreferenceDivider(hasLeading = false)
-                        Column(Modifier.padding(16.dp)) {
-                            Text(
-                                "上游网络代理：留空时自动使用 Android 系统 HTTP 代理，否则直连。" +
-                                    "如需手动代理，可填 http://127.0.0.1:端口 或 socks5://127.0.0.1:端口；" +
-                                    "127.0.0.1 指手机，不是电脑。填 direct 可强制直连。",
-                                style = MiuixTheme.textStyles.footnote1,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            TextField(
-                                value = localUpstreamProxy,
-                                onValueChange = { localUpstreamProxy = it },
-                                label = "HTTP / SOCKS5 代理（可选）",
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            EtaTextButton(
-                                text = "保存上游代理并重启网关",
-                                enabled = !localGatewayBusy,
-                                onClick = {
-                                    scope.launch {
-                                        localGatewayBusy = true
-                                        try {
-                                            withContext(Dispatchers.IO) {
-                                                OpenCodeEmbeddedGateway.setUpstreamProxy(localUpstreamProxy)
-                                            }
-                                            localGatewayStatus = "已保存；下次调用自动重启。" +
-                                                OpenCodeEmbeddedGateway.upstreamProxyDescription()
-                                        } catch (e: Exception) {
-                                            localGatewayStatus = "代理配置无效：${e.message ?: e.javaClass.simpleName}"
-                                        } finally {
-                                            localGatewayBusy = false
-                                        }
-                                    }
-                                },
-                            )
-                        }
-                        EtaPreferenceDivider(hasLeading = false)
-                        Column(Modifier.padding(16.dp)) {
-                            Text(
-                                "可选：填写合法的 Zen / Go 上游 Key；没有 Key 时仅使用网关支持的匿名模式。" +
-                                    "网关只暴露免费模型，但上游有权限制匿名调用。",
-                                style = MiuixTheme.textStyles.footnote1,
-                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            TextField(
-                                value = localZenKey,
-                                onValueChange = { localZenKey = it },
-                                label = "Zen 上游 Key（可选）",
-                                visualTransformation = PasswordVisualTransformation(),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            TextField(
-                                value = localGoKey,
-                                onValueChange = { localGoKey = it },
-                                label = "Go 上游 Key（可选）",
-                                visualTransformation = PasswordVisualTransformation(),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            EtaTextButton(
-                                text = "保存上游 Key",
-                                enabled = !localGatewayBusy,
-                                onClick = {
-                                    scope.launch {
-                                        localGatewayBusy = true
-                                        try {
-                                            withContext(Dispatchers.IO) {
-                                                OpenCodeEmbeddedGateway.setUpstreamKeys(localZenKey, localGoKey)
-                                            }
-                                            localGatewayStatus = "上游 Key 已保存，网关将在下一次请求时重启"
-                                        } catch (e: Exception) {
-                                            localGatewayStatus = "保存失败：${e.message ?: e.javaClass.simpleName}"
-                                        } finally {
-                                            localGatewayBusy = false
-                                        }
-                                    }
-                                },
-                            )
-                        }
-                        EtaPreferenceDivider(hasLeading = false)
-                        EtaPreference(
-                            title = "停止内置网关",
-                            summary = "停止本机子进程；下次拉取或发送时会自动启动",
-                            enabled = !localGatewayBusy,
-                            onClick = {
-                                scope.launch {
-                                    localGatewayBusy = true
-                                    withContext(Dispatchers.IO) { OpenCodeEmbeddedGateway.stop() }
-                                    localGatewayStatus = "已停止，下次需要时自动启动"
-                                    localGatewayBusy = false
-                                }
-                            },
-                        )
-                    }
-                }
-                if (provider !is AnthropicProviderSetting) {
-                    EtaPreferenceDivider(hasLeading = false)
-                    EtaWindowSpinnerPreference(
-                        items = listOf(
-                            DropdownItem(text = "Chat Completions API"),
-                            DropdownItem(text = "Responses API"),
-                        ),
-                        selectedIndex = if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) 1 else 0,
-                        title = stringResource(R.string.ui_endpoint_mode_3c8546),
-                        summary = if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) {
-                            context.getString(R.string.page_using_typed_items_with_semantic_streaming_events_f9c906)
+                ProviderConnectionFields(
+                    provider = provider,
+                    draft = draft,
+                    onDraftChange = onDraftChange,
+                    loginState = loginState,
+                    enabled = !isWorking && !loginState.isBusy,
+                    browserError = browserError,
+                    onOpenBrowser = openBrowser,
+                    onManageUsage = { browserError = openProviderAccountLink(context, "https://chatgpt.com/codex/settings/usage") },
+                    onLogin = {
+                        val validationError = validateProviderDraft(context, draft)
+                        if (validationError != null) {
+                            status = context.getString(R.string.provider_error, validationError)
                         } else {
-                            context.getString(R.string.page_use_standard_chat_completions_ee4b1a)
-                        },
-                        onSelectedIndexChange = { selectedIndex ->
-                            onDraftChange(
-                                draft.copy(
-                                    endpointMode = if (selectedIndex == 1) {
-                                        OpenAiEndpointMode.RESPONSES
-                                    } else {
-                                        OpenAiEndpointMode.CHAT_COMPLETIONS
-                                    },
-                                ),
-                            )
-                        },
-                    )
-                    if (draft.endpointMode == OpenAiEndpointMode.RESPONSES) {
-                        EtaPreferenceDivider(hasLeading = false)
-                        EtaSwitchPreference(
-                            title = stringResource(R.string.ui_server_side_web_search_ddb8e0),
-                            summary = stringResource(R.string.ui_allows_the_model_to_call_web_searches_provided_by_th_2f752f),
-                            checked = draft.hostedWebSearchEnabled,
-                            onCheckedChange = {
-                                onDraftChange(draft.copy(hostedWebSearchEnabled = it))
-                            },
-                        )
-                    }
-                }
+                            loginStore.login(draft.toProvider(provider))
+                        }
+                    },
+                    onDisconnect = loginStore::disconnect,
+                    onCancel = loginStore::cancel,
+                )
                 EtaPreferenceDivider(hasLeading = false)
                 EtaPreference(
                     title = stringResource(R.string.ui_test_connection_10b7d8),
                     summary = testStatus,
-                    enabled = !isWorking,
+                    enabled = !isWorking && !loginState.isBusy,
                     onClick = {
                         val validationError = validateProviderDraft(context, draft)
                         if (validationError != null) {
@@ -511,18 +283,7 @@ private fun ProviderConfigTab(
                             try {
                                 testStatus = testConnection(
                                     context,
-                                    buildUpdatedProvider(
-                                        source = provider,
-                                        name = draft.name,
-                                        baseUrl = draft.baseUrl,
-                                        apiKey = draft.apiKey,
-                                        systemPrompt = draft.systemPrompt,
-                                        isEnabled = draft.isEnabled,
-                                        endpointMode = draft.endpointMode,
-                                        hostedWebSearchEnabled = draft.hostedWebSearchEnabled,
-                                        anthropicVersion = draft.anthropicVersion,
-                                        customHeaders = draft.headers.map { it.header },
-                                    )
+                                    draft.toProvider(provider)
                                 )
                             } finally {
                                 isWorking = false
@@ -584,7 +345,7 @@ private fun ProviderConfigTab(
                         isNew -> context.getString(R.string.page_create_fcbd09)
                         else -> context.getString(R.string.page_save_configuration_817af1)
                     },
-                    enabled = !isWorking && !creationCommitted,
+                    enabled = !isWorking && !loginState.isBusy && !creationCommitted,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.textButtonColorsPrimary(),
                     onClick = {
@@ -595,18 +356,7 @@ private fun ProviderConfigTab(
                         }
                         scope.launch {
                             isWorking = true
-                            val built = buildUpdatedProvider(
-                                source = provider,
-                                name = draft.name,
-                                baseUrl = draft.baseUrl,
-                                apiKey = draft.apiKey,
-                                systemPrompt = draft.systemPrompt,
-                                isEnabled = draft.isEnabled,
-                                endpointMode = draft.endpointMode,
-                                hostedWebSearchEnabled = draft.hostedWebSearchEnabled,
-                                anthropicVersion = draft.anthropicVersion,
-                                customHeaders = draft.headers.map { it.header },
-                            )
+                            val built = draft.toProvider(provider)
                             try {
                                 if (isNew) {
                                     val added = ProviderRepository.addProvider(
@@ -667,7 +417,7 @@ private fun ProviderConfigTab(
                         .padding(horizontal = 16.dp)
                         .padding(top = 12.dp),
                     showIndication = true,
-                    onClick = if (isWorking) {
+                    onClick = if (isWorking || loginState.isBusy) {
                         null
                     } else {
                         {
@@ -780,14 +530,7 @@ private suspend fun testConnection(
     provider: ProviderSetting,
 ): String =
     RemoteModelFetcher.fetch(provider)
-        .map { models ->
-            if (ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE) {
-                "OpenCode 目录连接成功（${models.size} 个模型）。这只验证模型列表，" +
-                    "不代表免费推理已获授权；需选择模型发送测试消息。"
-            } else {
-                context.resources.getQuantityString(R.plurals.provider_models_fetched, models.size, models.size)
-            }
-        }
+        .map { context.resources.getQuantityString(R.plurals.provider_models_fetched, it.size, it.size) }
         .getOrElse { throwable ->
             context.getString(
                 R.string.provider_error,

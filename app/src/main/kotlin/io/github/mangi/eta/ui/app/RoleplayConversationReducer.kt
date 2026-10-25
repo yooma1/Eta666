@@ -18,73 +18,28 @@ internal object RoleplayConversationReducer {
             ),
         )
 
-    /**
-     * 把 journal 条目和界面消息重新对上号。
-     *
-     * 旧实现对每条 journal 条目都把 `state.messages` 全扫一遍，并且每次比较都要现拼
-     * `"${entry.messageId}-"` 这个前缀字符串：长会话下是 M×N 次字符串分配。
-     * ANR 栈里主线程就停在 `StringBuilder.append` → `Arrays.copyOf`，
-     * 表现正是"在已有会话发消息直接卡死"。
-     *
-     * 现在两趟：先把 journal 的 id 收进两个 HashSet，再单趟扫消息，
-     * 助手消息按"最长匹配前缀"归到所属条目上。整体 O(消息数 × id 段数 + journal 数)。
-     */
     fun linkRun(state: AgentChatUiState, runId: String): AgentChatUiState {
         if (state.roleplay == null) return state
         val links = state.roleplayMessages.links.toMutableMap()
         val journal = state.journal.ifEmpty { state.history }
-        if (journal.isNotEmpty()) {
-            val userIds = HashSet<String>()
-            val assistantIds = HashSet<String>()
-            journal.forEach { entry ->
-                val id = entry.messageId
-                if (id.isBlank()) return@forEach
-                when (entry.role) {
-                    "user" -> userIds += id
-                    "assistant" -> assistantIds += id
-                    else -> Unit
+        journal.filter { it.messageId.isNotBlank() }.forEach { entry ->
+            if (entry.role == "user") {
+                state.messages.filterIsInstance<UserMessageUi>().firstOrNull { it.id == entry.messageId }?.let {
+                    links[it.id] = RoleplayMessageLink(entry.messageId)
                 }
-            }
-            // 同一 journal 条目下的多条候选回复要按下标区分，所以先分组再按下标编号。
-            val grouped = LinkedHashMap<String, MutableList<AgentMessageUi>>()
-            state.messages.forEach { message ->
-                when (message) {
-                    is UserMessageUi -> if (message.id in userIds) {
-                        links[message.id] = RoleplayMessageLink(message.id)
+            } else if (entry.role == "assistant") {
+                state.messages.filterIsInstance<AgentMessageUi>()
+                    .filter { it.id == entry.messageId || it.id.startsWith("${entry.messageId}-") }
+                    .forEachIndexed { index, message ->
+                        // 展示窗口可能从同批正文中间开始，既有块序号不能按窗口下标重新编号。
+                        links.putIfAbsent(message.id, RoleplayMessageLink(entry.messageId, index))
                     }
-                    is AgentMessageUi -> journalBaseOf(message.id, assistantIds)?.let { base ->
-                        grouped.getOrPut(base) { mutableListOf() } += message
-                    }
-                    else -> Unit
-                }
-            }
-            grouped.forEach { (base, messages) ->
-                messages.forEachIndexed { index, message ->
-                    links[message.id] = RoleplayMessageLink(base, index)
-                }
             }
         }
         val fallback = state.messages.filterIsInstance<AgentMessageUi>().firstOrNull { it.id == "assistant-$runId" }
         val last = journal.lastOrNull { it.role == "assistant" && it.messageId.startsWith("assistant-$runId-") }
         if (fallback != null && last != null) links[fallback.id] = RoleplayMessageLink(last.messageId)
         return decorate(state.copy(roleplayMessages = state.roleplayMessages.copy(links = links)))
-    }
-
-    /**
-     * 恢复 journal 条目 id：`assistant-<runId>` 的候选回复是 `assistant-<runId>-<下标>`，
-     * 所以按 `-` 边界从长到短找第一个命中 journal 的前缀。
-     */
-    private fun journalBaseOf(messageId: String, journalIds: Set<String>): String? {
-        if (messageId in journalIds) return messageId
-        var index = messageId.length - 1
-        while (index > 0) {
-            if (messageId[index] == '-') {
-                val prefix = messageId.substring(0, index)
-                if (prefix in journalIds) return prefix
-            }
-            index--
-        }
-        return null
     }
 
     fun decorate(state: AgentChatUiState): AgentChatUiState {
@@ -103,11 +58,7 @@ internal object RoleplayConversationReducer {
 
     fun edit(state: AgentChatUiState, messageId: String, content: String): AgentChatUiState? {
         if (state.roleplay == null || messageId !in state.roleplayMessages.links || content.isBlank()) return null
-        val original = when (val target = state.messages.firstOrNull { it.id == messageId }) {
-            is UserMessageUi -> target.content
-            is AgentMessageUi -> target.content
-            else -> return null
-        }
+        val original = state.messageContent(messageId) ?: return null
         val previous = state.roleplayMessages.revisions[messageId]
             ?: RoleplayReplyRevision(original, listOf(original), 0)
         val updated = previous.copy(candidates = previous.candidates + content, selected = previous.candidates.size)
@@ -120,7 +71,7 @@ internal object RoleplayConversationReducer {
         return applyRevision(state, messageId, revision.copy(selected = index))
     }
 
-    private fun applyRevision(state: AgentChatUiState, id: String, revision: RoleplayReplyRevision): AgentChatUiState {
+    private fun applyRevision(state: AgentChatUiState, id: String, revision: RoleplayReplyRevision): AgentChatUiState? {
         val updated = state.copy(
             messages = state.messages.map {
                 when {
@@ -132,48 +83,71 @@ internal object RoleplayConversationReducer {
             roleplayMessages = state.roleplayMessages.copy(revisions = state.roleplayMessages.revisions + (id to revision)),
         )
         // 编辑旧正文后从完整历史重建模型投影，原 journal 和真实工具批次保持不变。
-        return decorate(updated.copy(history = projectJournal(updated)))
+        val history = projectJournal(updated) ?: return null
+        return decorate(updated.copy(history = history))
     }
 
-    fun projectJournal(state: AgentChatUiState): List<ConversationMessage> = buildList {
-        val grouped = state.roleplayMessages.links.entries.groupBy { it.value.transcriptMessageId }
-        val journal = state.journal.ifEmpty { state.history }
-        if (journal.any { it.contextSummary }) add(ConversationMessage(
-            role = "system", content = "早期历史仅保留摘要；正文修订只应用于仍有原文的消息，不能恢复已缺失的历史。",
-        ))
-        journal.forEach { entry ->
-            val links = grouped[entry.messageId].orEmpty().sortedBy { it.value.blockOrder }
-            val changed = links.any { it.key in state.roleplayMessages.revisions }
-            if (!changed) add(entry) else {
-                val body = links.mapNotNull { (id, _) ->
-                    state.roleplayMessages.revisions[id]?.content ?: when (val message = state.messages.firstOrNull { it.id == id }) {
-                        is UserMessageUi -> message.content
-                        is AgentMessageUi -> message.content
-                        else -> null
-                    }
-                }.joinToString("\n\n")
-                if (entry.role == "user") add(ConversationMessage(
-                    role = "system",
-                    content = "以下历史用户正文经用户修订；后续已有工具记录来自原请求，不能视为修订后请求已被执行。",
-                ))
-                add(entry.copy(content = body, contentJson = ""))
+    fun requiredOriginalContentIds(state: AgentChatUiState): Set<String> {
+        if (state.roleplay == null) return emptySet()
+        val visibleIds = state.messages.asSequence()
+            .filter { it is UserMessageUi || it is AgentMessageUi }
+            .mapTo(mutableSetOf()) { it.id }
+        val relevantIds = visibleIds + state.roleplayMessages.revisions.keys + state.roleplayMessages.pendingRewrites.values
+        val transcriptIds = relevantIds.mapNotNullTo(mutableSetOf()) {
+            state.roleplayMessages.links[it]?.transcriptMessageId
+        }
+        return state.roleplayMessages.links.entries.asSequence()
+            .filter { (id, link) ->
+                link.transcriptMessageId in transcriptIds && id !in visibleIds && id !in state.roleplayMessages.revisions
+            }
+            .mapTo(mutableSetOf()) { it.key }
+    }
+
+    fun projectJournal(state: AgentChatUiState): List<ConversationMessage>? {
+        return buildList {
+            val grouped = state.roleplayMessages.links.entries.groupBy { it.value.transcriptMessageId }
+            val journal = state.journal.ifEmpty { state.history }
+            if (journal.any { it.contextSummary }) add(ConversationMessage(
+                role = "system", content = "早期历史仅保留摘要；正文修订只应用于仍有原文的消息，不能恢复已缺失的历史。",
+            ))
+            journal.forEach { entry ->
+                val links = grouped[entry.messageId].orEmpty().sortedBy { it.value.blockOrder }
+                val changed = links.any { it.key in state.roleplayMessages.revisions }
+                if (!changed) add(entry) else {
+                    val body = links.map { (id, _) ->
+                        // 缺失块意味着本轮投影无法完整重建，不能把剩余片段冒充完整正文。
+                        state.messageContent(id) ?: return null
+                    }.joinToString("\n\n")
+                    if (entry.role == "user") add(ConversationMessage(
+                        role = "system",
+                        content = "以下历史用户正文经用户修订；后续已有工具记录来自原请求，不能视为修订后请求已被执行。",
+                    ))
+                    add(entry.copy(content = body, contentJson = ""))
+                }
             }
         }
     }
 
     fun rewriteHistory(state: AgentChatUiState, messageId: String): List<ConversationMessage>? {
         val link = state.roleplayMessages.links[messageId] ?: return null
-        val history = projectJournal(state)
+        val history = projectJournal(state) ?: return null
         val index = history.indexOfFirst { it.messageId == link.transcriptMessageId }
         if (index < 0) return null
         val siblings = state.roleplayMessages.links.entries
             .filter { it.value.transcriptMessageId == link.transcriptMessageId && it.value.blockOrder < link.blockOrder }
             .sortedBy { it.value.blockOrder }
-            .mapNotNull { (id, _) -> (state.messages.firstOrNull { it.id == id } as? AgentMessageUi)?.content }
+            .map { (id, _) -> state.messageContent(id) ?: return null }
         return history.take(index) + if (siblings.isEmpty()) emptyList() else listOf(
             ConversationMessage("assistant", siblings.joinToString("\n\n")),
         )
     }
+
+    private fun AgentChatUiState.messageContent(id: String): String? =
+        roleplayMessages.revisions[id]?.content ?: when (val message = messages.firstOrNull { it.id == id }) {
+            is UserMessageUi -> message.content
+            is AgentMessageUi -> message.content
+            else -> roleplayOriginalContents[id]
+        }
 
     fun applyRewrite(state: AgentChatUiState, runId: String, result: AgentRuntimeWire.RunResult): AgentChatUiState {
         if (runId in state.appliedRuntimeRunIds) return state

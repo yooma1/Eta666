@@ -12,7 +12,7 @@ internal object AgentRunRecoveryCoordinator {
 
     data class Plan(
         val completed: List<Completed>,
-        val reattach: AgentRunCheckpointStore.Checkpoint?,
+        val reattach: List<AgentRunCheckpointStore.Checkpoint>,
         val interrupted: List<AgentRunCheckpointStore.Checkpoint>,
     )
 
@@ -21,8 +21,8 @@ internal object AgentRunRecoveryCoordinator {
         completedRuns: List<AgentRuntimeWire.CompletedRun>,
         activeStateKnown: Boolean,
         terminalStateKnown: Boolean,
-        activeRunId: String?,
-        locallyObservedRunId: String?,
+        activeRunIds: Set<String>,
+        locallyObservedRunIds: Set<String>,
         /**
          * Runtime 状态查不到（冷启动首轮 binder 未就绪）时，把遗留 checkpoint 视为中断。
          * Runtime 与 UI 同进程：进程还活着就一定能在本地看到在跑的 run，
@@ -36,25 +36,23 @@ internal object AgentRunRecoveryCoordinator {
         val completed = completedRuns
             .asSequence()
             .filter { it.handoff.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
-            .filterNot { it.stableRunId == locallyObservedRunId }
+            .filterNot { it.stableRunId in locallyObservedRunIds }
             .sortedBy { it.createdAt }
             .map { run -> Completed(run, uiCheckpoints[run.stableRunId]) }
             .toList()
         val completedRunIds = completed.mapTo(mutableSetOf()) { it.result.stableRunId }
         val unresolved = uiCheckpoints.values
-            .filterNot { it.runId == locallyObservedRunId || it.runId in completedRunIds }
+            .filterNot { it.runId in locallyObservedRunIds || it.runId in completedRunIds }
             .sortedBy { it.createdAt }
-        val active = unresolved
-            .takeIf { activeStateKnown }
-            ?.singleOrNull { it.runId == activeRunId }
+        val active = if (activeStateKnown) unresolved.filter { it.runId in activeRunIds } else emptyList()
 
         return Plan(
             completed = completed,
             reattach = active,
             interrupted = if (activeStateKnown && terminalStateKnown) {
-                unresolved.filterNot { it.runId == active?.runId }
+                unresolved.filterNot { it.runId in activeRunIds }
             } else if (treatUnknownAsInterrupted) {
-                unresolved.filterNot { it.runId == active?.runId }
+                unresolved.filterNot { it.runId in activeRunIds }
             } else {
                 emptyList()
             },

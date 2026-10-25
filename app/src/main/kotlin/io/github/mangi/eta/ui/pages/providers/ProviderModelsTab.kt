@@ -47,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,21 +69,19 @@ import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.auth.ProviderAuthException
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
-import io.github.mangi.eta.agent.model.AgentModelCapabilityProbe
+import io.github.mangi.eta.data.model.ProviderAuthModes
+import io.github.mangi.eta.data.model.GeminiProviderSetting
+import io.github.mangi.eta.data.provider.GeminiModelCapabilities
 import io.github.mangi.eta.data.model.ProviderSetting
-import io.github.mangi.eta.data.model.ProviderSourceTypes
-import io.github.mangi.eta.data.provider.ProviderSourceRegistry
-import io.github.mangi.eta.data.provider.BuiltinProviders
-import io.github.mangi.eta.data.repository.OpenCodeEmbeddedGateway
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.ModelRepository
 import io.github.mangi.eta.data.repository.RemoteModelFetcher
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.components.EtaArrowPreference
 import io.github.mangi.eta.ui.components.EtaChoiceChip
-import io.github.mangi.eta.ui.components.EtaTextButton
 import io.github.mangi.eta.ui.components.EtaOverlayDialog
 import io.github.mangi.eta.ui.components.EtaPreferenceColors
 import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
@@ -99,7 +98,6 @@ import io.github.mangi.eta.ui.model.formatCompactTokenCount
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import androidx.compose.runtime.rememberCoroutineScope
 import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -185,7 +183,7 @@ internal fun ProviderModelsTab(
     contentSidePadding: Dp,
 ) {
     val context = LocalContext.current
-    val isOpenCode = ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE
+    val fetchScope = rememberCoroutineScope()
     val selectedModelId by RuntimeConfigRepository.selectedModelIdFlow().collectAsState(initial = null)
     var isFetching by remember { mutableStateOf(false) }
     var isMutatingModel by remember { mutableStateOf(false) }
@@ -270,7 +268,8 @@ internal fun ProviderModelsTab(
                 ) {
                     ProviderSection(title = stringResource(R.string.ui_model_management_183414)) {
                         EtaArrowPreference(
-                            title = if (isFetching) context.getString(R.string.page_retrieving_a880c9) else context.getString(R.string.page_automatically_pull_from_remote_f883d0),
+                            title = if (isFetching) context.getString(R.string.page_retrieving_a880c9)
+                            else context.getString(R.string.page_automatically_pull_from_remote_f883d0),
                             summary = stringResource(R.string.provider_models_endpoint_summary, provider.baseUrl),
                             enabled = !isFetching && !isMutatingModel,
                             startAction = {
@@ -281,25 +280,30 @@ internal fun ProviderModelsTab(
                                 )
                             },
                             onClick = {
-                                scope.launch {
+                                fetchScope.launch {
                                     isFetching = true
                                     message = null
                                     try {
-                                        val models = RemoteModelFetcher.fetch(provider).getOrElse { throwable ->
+                                        val catalog = RemoteModelFetcher.fetchCatalog(provider).getOrElse { throwable ->
                                             message = context.getString(
                                                 R.string.provider_error,
                                                 throwable.message ?: throwable.javaClass.simpleName,
                                             )
                                             return@launch
                                         }
-                                        val chatModels = models.filter(RemoteModelFetcher::isChatCapableModel)
-                                        val candidates = ModelRepository.newRemoteModels(provider.id, chatModels)
+                                        if (ProviderAuthModes.isOAuth(provider.authMode)) {
+                                            val sync = ModelRepository.syncRemoteCatalog(catalog)
+                                            RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                                            message = "已同步 ${sync.fetchedCount} 个远端模型"
+                                            return@launch
+                                        }
+                                        val candidates = ModelRepository.newRemoteModels(provider.id, catalog.models)
                                         if (candidates.isNotEmpty()) {
-                                            pendingImport = RemoteModelImport(chatModels, candidates)
+                                            pendingImport = RemoteModelImport(catalog, candidates)
                                             return@launch
                                         }
                                         // 没有新模型时仍同步一次，刷新已添加模型的元数据并移除远端已下线的模型。
-                                        val sync = ModelRepository.syncRemoteModels(provider.id, chatModels, emptySet())
+                                        val sync = ModelRepository.syncRemoteCatalog(catalog, emptySet())
                                         if (sync.applied) {
                                             RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
                                         }
@@ -321,61 +325,6 @@ internal fun ProviderModelsTab(
                                 }
                             },
                         )
-
-                        if (isOpenCode) {
-                            EtaPreferenceDivider()
-                            EtaArrowPreference(
-                                title = if (isFetching) "正在读取免费模型…" else "拉取 OpenCode 免费模型",
-                                summary = if (RemoteModelFetcher.shouldReadOfficialZenCatalog(provider)) {
-                                    "直接读取 OpenCode Zen 官方公开目录，无需等待内置网关；显示免费标记不代表可以匿名推理"
-                                } else {
-                                    "从当前 opencode2api /v1/models 读取免费模型；需要网关自身目录就绪"
-                                },
-                                enabled = !isFetching && !isMutatingModel,
-                                startAction = {
-                                    EtaPreferenceIcon(
-                                        icon = Icons.Rounded.CloudDownload,
-                                        enabled = !isFetching && !isMutatingModel,
-                                        tint = EtaPreferenceColors.Green,
-                                    )
-                                },
-                                onClick = {
-                                    scope.launch {
-                                        isFetching = true
-                                        message = null
-                                        try {
-                                            val models = RemoteModelFetcher.fetchFreeModels(provider)
-                                                .getOrElse { throw it }
-                                            val candidates = ModelRepository.newRemoteModels(provider.id, models)
-                                            message = if (candidates.isEmpty()) {
-                                                if (models.isEmpty()) {
-                                                    "目录已返回，但没有明确标记免费的聊天模型；不会导入未验证的付费模型"
-                                                } else {
-                                                    "已读取 ${models.size} 个免费聊天模型，全部已添加。" +
-                                                        "目录可见不代表推理已获授权；本次不会移除已有模型"
-                                                }
-                                            } else {
-                                                pendingImport = RemoteModelImport(
-                                                    fetched = models, candidates = candidates,
-                                                    additiveOnly = true,
-                                                )
-                                                null
-                                            }
-                                        } catch (cancelled: CancellationException) {
-                                            throw cancelled
-                                        } catch (throwable: Throwable) {
-                                            val source = if (RemoteModelFetcher.shouldReadOfficialZenCatalog(provider)) {
-                                                "官方 Zen 公开目录"
-                                            } else "当前网关目录"
-                                            message = "${source}读取失败：${throwable.message ?: throwable.javaClass.simpleName}。" +
-                                                "模型列表和实际推理授权是两项独立检查"
-                                        } finally {
-                                            isFetching = false
-                                        }
-                                    }
-                                },
-                            )
-                        }
 
                         EtaArrowPreference(
                             title = stringResource(R.string.ui_add_custom_model_a5ddc0),
@@ -495,8 +444,22 @@ internal fun ProviderModelsTab(
                             },
                             onSetCurrent = {
                                 scope.launch {
-                                    RuntimeConfigRepository.setSelectedModelId(model.id)
-                                    RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                                    try {
+                                        RuntimeConfigRepository.setSelectedModelId(model.id)
+                                        RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (failure: ProviderAuthException) {
+                                        message = context.getString(
+                                            R.string.provider_error,
+                                            failure.message ?: context.getString(R.string.state_ui_model_switching_failed_please_try_again_later_4af439),
+                                        )
+                                    } catch (_: Exception) {
+                                        message = context.getString(
+                                            R.string.provider_error,
+                                            context.getString(R.string.state_ui_model_switching_failed_please_try_again_later_4af439),
+                                        )
+                                    }
                                 }
                             },
                         )
@@ -533,8 +496,8 @@ internal fun ProviderModelsTab(
 
     editingModel?.let { model ->
         ModelEditDialog(
+            nativeGemini = provider is GeminiProviderSetting,
             model = model,
-            provider = provider,
             isNew = isCreatingModel,
             isSaving = isMutatingModel,
             error = editorError,
@@ -663,19 +626,19 @@ internal fun ProviderModelsTab(
             scope.launch {
                 isMutatingModel = true
                 try {
-                    val sync = if (pending.additiveOnly) {
-                        ModelRepository.importRemoteSubset(provider.id, pending.fetched, adopted)
-                    } else {
-                        ModelRepository.syncRemoteModels(provider.id, pending.fetched, adopted)
-                    }
+                    val sync = ModelRepository.syncRemoteCatalog(pending.catalog, adopted)
                     if (sync.applied) {
                         RuntimeConfigRepository.syncToRemotePreferences(EtaApp.serviceInstance)
                     }
-                    message = context.resources.getQuantityString(
-                        R.plurals.provider_models_added,
-                        sync.addedCount,
-                        sync.addedCount,
-                    )
+                    message = when {
+                        !sync.applied -> context.getString(R.string.page_the_remote_end_did_not_return_a_usable_conversation__781487)
+                        adopted.isEmpty() -> context.getString(R.string.provider_models_up_to_date)
+                        else -> context.resources.getQuantityString(
+                            R.plurals.provider_models_added,
+                            sync.addedCount,
+                            sync.addedCount,
+                        )
+                    }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (throwable: Throwable) {
@@ -911,8 +874,8 @@ private fun ModelListItem(
 
 @Composable
 private fun ModelEditDialog(
+    nativeGemini: Boolean,
     model: Model,
-    provider: ProviderSetting,
     isNew: Boolean,
     isSaving: Boolean,
     error: String?,
@@ -921,7 +884,6 @@ private fun ModelEditDialog(
     onDelete: (() -> Unit)?,
 ) {
     val context = LocalContext.current
-    val isOpenCode = ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE
     var displayName by remember(model.id, isNew) { mutableStateOf(model.displayName) }
     var modelId by remember(model.id, isNew) { mutableStateOf(model.modelId) }
     var contextWindowOverrideText by remember(model.id, isNew) {
@@ -945,6 +907,7 @@ private fun ModelEditDialog(
         )
     }
     val contextError = contextWindowInputError(contextWindowOverrideText)
+    val geminiCapabilities = if (nativeGemini) GeminiModelCapabilities.requestReasoningCapabilities(modelId) else null
 
     fun resetAutomaticReasoning() {
         reasoningOverrideActive = false
@@ -961,8 +924,8 @@ private fun ModelEditDialog(
         contextWindowOverride = contextWindowOverrideText.trim()
             .takeIf(String::isNotEmpty)
             ?.toInt(),
-        reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive },
-        reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled) {
+        reasoningOverride = reasoningEnabled.takeIf { reasoningOverrideActive && geminiCapabilities == null },
+        reasoningCapabilitiesOverride = if (reasoningOverrideActive && reasoningEnabled && geminiCapabilities == null) {
             val canDisable = ReasoningEffort.OFF in selectedReasoningEfforts
             (model.effectiveReasoningCapabilities ?: ModelReasoningCapabilities()).copy(
                 supportedEfforts = editableReasoningEfforts.filter { effort ->
@@ -979,66 +942,6 @@ private fun ModelEditDialog(
             null
         },
     )
-
-    val probeScope = rememberCoroutineScope()
-    var probing by remember(model.id, isNew) { mutableStateOf(false) }
-    var probeNote by remember(model.id, isNew) { mutableStateOf<String?>(null) }
-
-    // 能力探测：只认确定结论——报错里解析出的窗口上限直接填入，思考参数被明确拒绝即按不支持处理。
-    fun runProbe() {
-        if (probing || modelId.isBlank()) return
-        probing = true
-        probeNote = null
-        probeScope.launch {
-            try {
-                val outcome = AgentModelCapabilityProbe().probe(
-                    RuntimeConfigRepository.buildRuntimeConfig(provider, updated()),
-                )
-                val notes = mutableListOf<String>()
-                if (!outcome.reachable) {
-                    notes += context.getString(R.string.ui_probe_capability_unreachable_5d2f18) +
-                        "：" + outcome.detail.take(180)
-                    if (isOpenCode) {
-                        if (provider.id == BuiltinProviders.OPENCODE_ID &&
-                            OpenCodeEmbeddedGateway.useLocal(provider) &&
-                            OpenCodeEmbeddedGateway.zenKey().isBlank() &&
-                            OpenCodeEmbeddedGateway.goKey().isBlank()
-                        ) {
-                            notes += "内置网关未配置 Zen/Go 上游 Key；免费模型目录可读取，不代表匿名推理已授权"
-                        } else if (provider.apiKey.isBlank() &&
-                            (provider.id != BuiltinProviders.OPENCODE_ID ||
-                                !OpenCodeEmbeddedGateway.useLocal(provider))
-                        ) {
-                            notes += "请在 OpenCode 配置页填写有效 API Key；公开目录不代表推理免认证"
-                        }
-                    }
-                }
-                outcome.contextLimitFromError?.let { limit ->
-                    contextWindowOverrideText = limit.toString()
-                    notes += context.getString(R.string.ui_probe_capability_window_filled_1b7c53, limit)
-                }
-                when (outcome.reasoning) {
-                    false -> {
-                        reasoningOverrideActive = true
-                        reasoningEnabled = false
-                        notes += context.getString(R.string.ui_probe_capability_reasoning_off_9a4e60)
-                    }
-                    true -> notes += context.getString(R.string.ui_probe_capability_reasoning_on_6c8b41)
-                    null -> Unit
-                }
-                if (notes.isEmpty()) notes += outcome.detail.take(160)
-                probeNote = notes.joinToString("；")
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (throwable: Throwable) {
-                probeNote = throwable.message.orEmpty().ifBlank {
-                    context.getString(R.string.ui_probe_capability_failed_2e9d70)
-                }
-            } finally {
-                probing = false
-            }
-        }
-    }
 
     EtaOverlayDialog(
         show = true,
@@ -1118,34 +1021,13 @@ private fun ModelEditDialog(
                     },
                     modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    EtaTextButton(
-                        text = stringResource(
-                            if (probing) {
-                                R.string.ui_probe_capability_running_7b04de
-                            } else {
-                                R.string.ui_probe_capability_3f9c21
-                            },
-                        ),
-                        enabled = !isSaving && !probing && modelId.isNotBlank(),
-                        onClick = { runProbe() },
-                    )
-                    probeNote?.let { note ->
-                        Text(text = note, modifier = Modifier.weight(1f, fill = false))
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
                 Spacer(modifier = Modifier.height(16.dp))
                 // 弹窗内不再套卡片：卡片与弹窗同色看不出边界，内边距只会让这一段错开左缘。
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable(enabled = !isSaving) {
+                        .clickable(enabled = !isSaving && geminiCapabilities == null) {
                             reasoningOverrideActive = true
                             reasoningEnabled = !reasoningEnabled
                         }
@@ -1154,12 +1036,16 @@ private fun ModelEditDialog(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = stringResource(R.string.ui_support_thinking_5b9e4c),
+                            text = if (geminiCapabilities != null && !geminiCapabilities.mandatory) "思考档位使用 Default"
+                                else stringResource(R.string.ui_support_thinking_5b9e4c),
                             style = MiuixTheme.textStyles.body1,
                             color = MiuixTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = if (reasoningOverrideActive) {
+                            text = if (geminiCapabilities != null) {
+                                if (geminiCapabilities.mandatory) "该模型必须思考，不支持 Off；Default 使用模型默认档位。"
+                                else "尚未确认该模型的思考档位；仅使用 Default，不发送自定义思考档位。"
+                            } else if (reasoningOverrideActive) {
                                 stringResource(R.string.page_covered_model_automatic_capabilities_3fa7d4)
                             } else {
                                 stringResource(
@@ -1177,23 +1063,23 @@ private fun ModelEditDialog(
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     EtaSwitch(
-                        checked = reasoningEnabled,
+                        checked = geminiCapabilities != null || reasoningEnabled,
                         onCheckedChange = { enabled ->
                             reasoningOverrideActive = true
                             reasoningEnabled = enabled
                         },
-                        enabled = !isSaving,
+                        enabled = !isSaving && geminiCapabilities == null,
                     )
                 }
-                if (reasoningEnabled) {
+                if (geminiCapabilities != null || reasoningEnabled) {
                     // Default 始终可用（交给模型或 Provider 决定），不作为可选项展示。
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.padding(top = 10.dp),
                     ) {
-                        editableReasoningEfforts.forEach { effort ->
-                            val checked = effort in selectedReasoningEfforts
+                        (geminiCapabilities?.supportedEfforts ?: editableReasoningEfforts).forEach { effort ->
+                            val checked = geminiCapabilities != null || effort in selectedReasoningEfforts
                             EtaChoiceChip(
                                 text = effort.displayName,
                                 selected = checked,
@@ -1205,13 +1091,14 @@ private fun ModelEditDialog(
                                         selectedReasoningEfforts + effort
                                     }
                                 },
-                                enabled = !isSaving,
+                                enabled = !isSaving && geminiCapabilities == null,
                             )
                         }
                     }
                 }
                 Text(
-                    text = stringResource(R.string.ui_only_check_the_ranges_actually_supported_by_the_mode_2c343d),
+                    text = if (nativeGemini) "Gemini 原生连接只发送已确认支持的思考档位。"
+                        else stringResource(R.string.ui_only_check_the_ranges_actually_supported_by_the_mode_2c343d),
                     style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     modifier = Modifier.padding(start = 4.dp, top = 8.dp),

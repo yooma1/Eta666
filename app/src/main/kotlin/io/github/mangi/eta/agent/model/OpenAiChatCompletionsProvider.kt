@@ -3,9 +3,9 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
-import io.github.mangi.eta.data.repository.OpenCodeEmbeddedGateway
 import java.util.UUID
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -39,7 +39,6 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
         require(config.openAiEndpointMode == OpenAiEndpointMode.CHAT_COMPLETIONS) {
             "当前 Provider 未配置为 Chat Completions API"
         }
-        OpenCodeEmbeddedGateway.ensureRunningFor(config)
         val url = ProviderUrls.openAiChatCompletionsUrl(config.baseUrl)
         val headers = okhttp3.Headers.Builder()
             .add("Content-Type", "application/json; charset=utf-8")
@@ -51,8 +50,7 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             }
             .also {
                 ProviderRequestHeaders.mergeInto(
-                    it, config.baseUrl, config.customHeaders,
-                    request.sessionId, config.providerSourceType,
+                    it, config.baseUrl, config.customHeaders, request.sessionId, config.authMode, config.model,
                 )
             }
             .build()
@@ -73,52 +71,28 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
             .post(requestBody)
             .build()
 
-        val call = AgentHttpClient.modelClient(request.purpose).newCall(httpRequest)
-        val binding = runController.register { call.cancel() }
-
-        try {
-            runController.throwIfCancelled()
-            onEvent(ProviderEvent.RequestStarted)
-
-            call.execute().use { response ->
-                val code = response.code
-                onEvent(ProviderEvent.ResponseHeaders(code))
-                runController.throwIfCancelled()
-
-                if (!response.isSuccessful) {
-                    val errorBody = response.peekBody(16_384).string()
-                    if (code == 502 && OpenCodeEmbeddedGateway.isEmbeddedConfig(config)) {
-                        throw AgentModelFailure.embeddedOpenCode502(
-                            errorBody,
-                            OpenCodeEmbeddedGateway.recentGatewayFailureHint(),
-                            OpenCodeEmbeddedGateway.upstreamProxyDescription(),
-                        )
-                    }
-                    throw AgentModelFailure.http(
-                        code, errorBody,
-                        ProviderSourceRegistry.resolve(
-                            config.providerId, config.providerSourceType,
-                            config.baseUrl, config.providerType,
-                        ),
-                    )
-                }
-
-                val assistantMessage = readStreamingAssistantMessage(
-                    response.body.byteStream(), runController, existingToolCallIds, onEvent,
-                )
-                onEvent(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
-                return ProviderResponse(assistantMessage)
+        runController.throwIfCancelled()
+        onEvent(ProviderEvent.RequestStarted)
+        return AuthorizedProviderHttp.execute(
+            client = AgentHttpClient.modelClient(request.purpose),
+            providerId = config.providerId,
+            authMode = config.authMode,
+            request = httpRequest,
+            controller = runController,
+        ) { response ->
+            onEvent(ProviderEvent.ResponseHeaders(response.code))
+            if (!response.isSuccessful) {
+                throw AgentModelFailure.http(response.code, response.peekBody(16_384).string())
             }
-        } catch (throwable: Throwable) {
-            runCatching { runController.throwIfCancelled() }
-                .getOrElse { interruption -> throw interruption }
-            throw throwable
-        } finally {
-            binding.close()
+            val assistantMessage = readStreamingAssistantMessage(
+                response.body.byteStream(), runController, existingToolCallIds, onEvent,
+            )
+            onEvent(ProviderEvent.Completed(assistantMessage.optString("finish_reason").ifBlank { null }))
+            ProviderResponse(assistantMessage)
         }
     }
 
-    private fun buildRequestJson(
+    internal fun buildRequestJson(
         config: AgentModelClient.ModelConfig,
         messages: JSONArray,
         tools: JSONArray
@@ -142,6 +116,19 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
                 mergeExtraBody(request, config.extraBodyJson)
                 RequestBodyMerge.mergeCustomBody(request, config.customBody)
                 ProviderReasoning.applyOpenAiCompatibleRequest(request, config)
+                if (config.authMode == ProviderAuthModes.XAI_GROK) {
+                    // 代理按请求头路由模型，正文必须与同一配置一致，并保持订阅所需的流式调用。
+                    request.put("model", config.model)
+                    request.put("stream", true)
+                    request.put("messages", OpenAiRequestMessages.forChatCompletions(messages))
+                    if (tools.length() > 0) {
+                        request.put("tools", tools)
+                        request.put("tool_choice", "auto")
+                    } else {
+                        request.remove("tools")
+                        request.remove("tool_choice")
+                    }
+                }
             }
     }
 

@@ -22,17 +22,23 @@ internal data class AgentChatUiState(
     val availableReasoningEfforts: List<ReasoningEffort> = emptyList(),
     val pendingImages: List<PendingImageUi> = emptyList(),
     val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
+    val queuedMessages: List<QueuedMessageUi> = emptyList(),
+    val inputSyncVersion: Int = 0,
     val appliedRuntimeRunIds: List<String> = emptyList(),
     val messageEdit: MessageEditUiState? = null,
     val roleplay: RoleplayBinding? = null,
     val roleplayMessages: RoleplayMessageState = RoleplayMessageState(),
+    /** 窗口外但参与正文修订的同批消息原文；仅按需加载，不写入会话元数据。 */
+    val roleplayOriginalContents: Map<String, String> = emptyMap(),
     /** 会话最近一次发送使用的本地 Model.id；null 表示尚未绑定，跟随默认模型。 */
     val modelId: String? = null,
-    /**
-     * 运行中提交的消息。它们还没进入模型上下文：可以「引导」进当前这轮，
-     * 也可以删掉；本轮结束后队首会自动作为普通消息发出。
-     */
-    val queuedMessages: List<QueuedMessageUi> = emptyList(),
+    /** 未打开的会话仅保留侧栏预览，不能把占位状态写回消息和上下文。 */
+    val isConversationLoaded: Boolean = true,
+    /** 当前展示窗口首条消息的持久化 sort_index，保存只更新这一位置之后的后缀。 */
+    val messageStartIndex: Int = 0,
+    val hasEarlierMessages: Boolean = false,
+    val conversationCharacterName: String? = null,
+    val conversationCharacterAvatarPath: String? = null,
     /** 当前会话的持续目标；null 表示没有开启目标模式。 */
     val goal: String? = null,
     /** 目标模式被用户暂停：run 挂在下一个检查点，等继续。 */
@@ -49,15 +55,6 @@ internal data class AgentChatUiState(
     }
 }
 
-/** 一条等待发送的消息。[content] 是用户原始输入，不含任何内部前缀。 */@Immutable
-data class QueuedMessageUi(
-    val id: String,
-    val content: String,
-) {
-    /** 输入区那一行卡片只展示首行，避免整段提示词把输入框顶掉。 */
-    val preview: String
-        get() = content.lineSequence().firstOrNull()?.trim()?.take(160).orEmpty()
-}
 
 /** 目标拆解进度：界面只需要这两个数，完整清单在会话文件里。 */
 @Immutable
@@ -102,6 +99,8 @@ data class AgentMessageUi(
     val characterEditable: Boolean = false,
     val candidateCount: Int = 1,
     val selectedCandidate: Int = 0,
+    /** 仅当前内存会话展示，不进入消息存储、归档与导出。 */
+    val searchSuggestionsHtml: List<String> = emptyList(),
 ) : AgentChatMessageUi
 
 enum class SystemNoticeCode(val wireValue: String) {
@@ -218,6 +217,15 @@ data class PendingImageUi(
 data class PendingFileReferenceUi(
     val id: String,
     val reference: AgentFileReference,
+)
+
+@Immutable
+internal data class QueuedMessageUi(
+    val id: String,
+    val content: String,
+    val pendingImages: List<PendingImageUi> = emptyList(),
+    val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
+    val immediateInterrupt: Boolean = false,
 )
 
 @Immutable

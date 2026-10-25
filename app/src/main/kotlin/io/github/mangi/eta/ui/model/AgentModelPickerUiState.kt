@@ -2,6 +2,7 @@ package io.github.mangi.eta.ui.model
 
 import androidx.compose.runtime.Immutable
 import io.github.mangi.eta.data.model.Model
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
@@ -52,6 +53,7 @@ internal object AgentModelPickerProjector {
         val enabledProviders = providers
             .asSequence()
             .filter(ProviderSetting::isEnabled)
+            .filter { it.authMode == ProviderAuthModes.API_KEY || ProviderAuthModes.isOAuth(it.authMode) }
             .sortedBy(ProviderSetting::sortOrder)
             .toList()
         val selectedProvider = enabledProviders.firstOrNull { it.id == selectedProviderId }
@@ -68,11 +70,11 @@ internal object AgentModelPickerProjector {
                 .firstOrNull { it.id == selectedModelId }
         val groups = enabledProviders
             .asSequence()
-            // OpenCode's embedded gateway supplies its own loopback API key.
-            // Hiding the provider just because the *external* key is blank makes
-            // successfully imported Zen models impossible to select in chat.
+            // 上游：OAuth 登录的 provider 不需要 API Key 也应出现在选择器里。
+            // 分支：OpenCode 内嵌网关自带 loopback key，外部 key 为空时也要能选到已导入的 Zen 模型。
             .filter { provider ->
-                provider.apiKey.isNotBlank() ||
+                ProviderAuthModes.isOAuth(provider.authMode) ||
+                    (provider.authMode == ProviderAuthModes.API_KEY && provider.apiKey.isNotBlank()) ||
                     ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE
             }
             .mapNotNull { provider ->

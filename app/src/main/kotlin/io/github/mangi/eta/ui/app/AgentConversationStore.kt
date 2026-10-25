@@ -1,7 +1,8 @@
 package io.github.mangi.eta.ui.app
 
 import android.content.Context
-import android.os.SystemClock
+import android.util.JsonReader
+import android.util.JsonToken
 import androidx.room.withTransaction
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
@@ -10,11 +11,13 @@ import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.data.db.ConversationContextCheckpointEntity
 import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMetadata
-import io.github.mangi.eta.data.db.ChunkedTextDao
+import io.github.mangi.eta.data.db.ConversationDao
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.data.db.openTextStream
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.repository.ConversationSearchRepository
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.core.safeStackTrace
@@ -55,13 +58,6 @@ internal object AgentConversationStore {
          * 重启后列表被压紧；增量保存按下标截断后缀，这些会话必须先整段重写一次。
          */
         val unalignedConversationIds: Set<String> = emptySet(),
-        /**
-         * journal 故意没从库里读回来的会话（体积过大）。它们的 journal 必须**原样留在库里**：
-         * 否则下一次保存会拿 `journal.ifEmpty { history }` 把它覆盖掉。
-         */
-        val journalNotLoadedIds: Set<String> = emptySet(),
-        /** 同上，history 没读回来的会话；保存时不许写 history 列。 */
-        val historyNotLoadedIds: Set<String> = emptySet(),
     )
 
     private val saveMutex = Mutex()
@@ -77,15 +73,8 @@ internal object AgentConversationStore {
         conversationsById: Map<String, AgentChatHomeUiState>,
         titles: Map<String, String>,
         updatedAt: Map<String, Long>,
-        journalNotLoadedIds: Set<String> = emptySet(),
-        historyNotLoadedIds: Set<String> = emptySet(),
     ) = AgentConversationPersistence().save(
-        context,
-        Snapshot(
-            selectedConversationId, conversationsById, titles, updatedAt,
-            journalNotLoadedIds = journalNotLoadedIds,
-            historyNotLoadedIds = historyNotLoadedIds,
-        ),
+        context, Snapshot(selectedConversationId, conversationsById, titles, updatedAt),
     )
 
     internal suspend fun saveChanges(
@@ -93,106 +82,85 @@ internal object AgentConversationStore {
         selectedConversationId: String?,
         current: Map<String, AgentConversationPersistence.Content>,
         previous: Map<String, AgentConversationPersistence.Content>,
-        journalNotLoadedIds: Set<String> = emptySet(),
-        historyNotLoadedIds: Set<String> = emptySet(),
     ) {
         val appContext = context.applicationContext
         saveMutex.withLock {
             withContext(Dispatchers.IO) {
-                val startedAt = SystemClock.elapsedRealtime()
                 var phase = "read_metadata"
                 try {
                     val database = EtaDatabase.get(appContext)
                     val dao = database.conversationDao()
-                    val stored = dao.conversationMetadataRows().associateBy { it.id }
-                    val staleIds = stored.keys - current.keys
-
-                    // 重活全部放在事务外：历史/消息的 JSON 编码可能到 MB 级，
-                    // 放进事务会把 Room 写锁一直占着，runtime 侧的 checkpoint 落盘
-                    // （runBlocking 写库）会被它卡住——表现就是"继续对话卡死"。
-                    val plans = current.map { (id, state) ->
-                        val old = previous[id].takeIf { id in stored }
-                        phase = "encode_metadata"
-                        val metadata = if (old == null || !state.sameMetadata(old)) {
-                            ConversationEntity(
-                                id = id, title = state.title,
-                                thinkingEnabled = state.reasoningEffort.enablesReasoning,
-                                reasoningEffort = state.reasoningEffort.wireValue,
-                                appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds),
-                                roleplayJson = state.roleplay?.let { json.encodeToString(it) }.orEmpty(),
-                                revisionsJson = if (state.roleplay == null) "" else json.encodeToString(state.roleplayMessages),
-                                createdAt = stored[id]?.createdAt ?: state.updatedAt.takeIf { it != 0L } ?: System.currentTimeMillis(),
-                                updatedAt = state.updatedAt.takeIf { it != 0L } ?: System.currentTimeMillis(),
-                                modelId = state.modelId,
-                            )
-                        } else null
-                        val historyChanged = old == null || state.history != old.history
-                        val journalChanged = old == null || state.journal != old.journal
-                        var history: String? = null
-                        var journal: String? = null
-                        if (historyChanged || journalChanged) {
-                            val missing = dao.contextCheckpointRow(id) == null
-                            phase = "encode_history"
-                            // history 没读回来的会话：写 null 保持库里的原值，
-                            // 否则空 history 会把上下文检查点覆盖成 "[]"，下一轮直接失忆。
-                            if ((missing || historyChanged) && id !in historyNotLoadedIds) {
-                                history = AgentConversationCodec.encodeConversationCheckpoint(state.history)
-                            }
-                            phase = "encode_journal"
-                            // journal 没读回来的会话：只写 history，journal 列传 null 保持原值。
-                            // 否则空 journal 会退化成 history 覆盖掉库里的完整记录。
-                            if ((missing || journalChanged) && id !in journalNotLoadedIds) {
-                                journal = encodeJournal(state.journal)
-                            }
-                        }
-                        val oldMessages = old?.messages.orEmpty()
-                        var prefix = 0
-                        while (prefix < minOf(oldMessages.size, state.messages.size)) {
-                            val before = oldMessages[prefix]
-                            val after = state.messages[prefix]
-                            if (before != after && before.toEntityOrNull(id, prefix) != after.toEntityOrNull(id, prefix)) break
-                            prefix++
-                        }
-                        val rewriteMessages = old == null || prefix != oldMessages.size || prefix != state.messages.size
-                        phase = "encode_message"
-                        val messageRows = if (rewriteMessages) {
-                            (prefix until state.messages.size).mapNotNull { index ->
-                                state.messages[index].toEntityOrNull(id, index)
-                            }
-                        } else {
-                            emptyList()
-                        }
-                        PersistPlan(
-                            id = id,
-                            metadata = metadata,
-                            history = history,
-                            journal = journal,
-                            deleteMessagesFrom = if (rewriteMessages) prefix else null,
-                            messageRows = messageRows,
-                        )
-                    }
-
-                    phase = "write"
-                    val encodeMs = SystemClock.elapsedRealtime() - startedAt
-                    if (encodeMs >= SLOW_PERSIST_MS) {
-                        AndroidAgentLogger.warn(
-                            "conversation persist slow: encode=${encodeMs}ms conversations=${current.size}",
-                        )
-                    }
                     database.withTransaction {
-                        staleIds.forEach { dao.deleteConversation(it) }
-                        plans.forEach { plan ->
-                            plan.metadata?.let { dao.insertConversations(listOf(it)) }
-                            if (plan.history != null || plan.journal != null) {
-                                phase = "write_checkpoint"
-                                dao.updateContextCheckpoint(plan.id, plan.history, plan.journal)
+                        val stored = dao.conversationIdentities().associateBy { it.id }
+                        phase = "delete_conversations"
+                        (stored.keys - current.keys).forEach { dao.deleteConversation(it) }
+                        for ((id, state) in current) {
+                            if (!state.isConversationLoaded) {
+                                val row = stored[id] ?: continue
+                                if (row.title != state.title || row.updatedAt != state.updatedAt) {
+                                    dao.updateConversationTitle(id, state.title, state.updatedAt)
+                                }
+                                continue
                             }
-                            plan.deleteMessagesFrom?.let { from ->
+                            val old = previous[id].takeIf { id in stored && it?.isConversationLoaded == true }
+                            if (old == null || !state.sameMetadata(old)) {
+                                phase = "encode_metadata"
+                                val row = ConversationEntity(
+                                    id = id, title = state.title,
+                                    thinkingEnabled = state.reasoningEffort.enablesReasoning,
+                                    reasoningEffort = state.reasoningEffort.wireValue,
+                                    appliedRuntimeRunIdsJson = json.encodeToString(state.appliedRuntimeRunIds),
+                                    roleplayJson = state.roleplay?.let { json.encodeToString(it) }.orEmpty(),
+                                    revisionsJson = if (state.roleplay == null) "" else json.encodeToString(state.roleplayMessages),
+                                    createdAt = stored[id]?.createdAt ?: state.updatedAt.takeIf { it != 0L } ?: System.currentTimeMillis(),
+                                    updatedAt = state.updatedAt.takeIf { it != 0L } ?: System.currentTimeMillis(),
+                                    modelId = state.modelId,
+                                )
+                                phase = "write_metadata"
+                                dao.insertConversations(listOf(row))
+                            }
+                            if (old == null || state.history != old.history || state.journal != old.journal) {
+                                val missing = dao.contextCheckpointRow(id) == null
+                                phase = "encode_history"
+                                val history = if (missing || old == null || state.history != old.history) {
+                                    AgentConversationCodec.encodeConversationCheckpoint(state.history)
+                                } else null
+                                phase = "encode_journal"
+                                val journal = if (missing || old == null || state.journal != old.journal) {
+                                    AgentConversationCodec.encodeTranscriptForStorage(state.journal)
+                                } else null
+                                phase = "write_checkpoint"
+                                dao.updateContextCheckpoint(id, history, journal)
+                            }
+                            val oldMessages = old?.messages.orEmpty()
+                            var prefix = 0
+                            val aligned = old != null && old.messageStartIndex == state.messageStartIndex &&
+                                dao.nextMessageIndex(id) == old.messageStartIndex + oldMessages.size
+                            while (aligned && prefix < minOf(oldMessages.size, state.messages.size)) {
+                                val before = oldMessages[prefix]
+                                val after = state.messages[prefix]
+                                val sortIndex = state.messageStartIndex + prefix
+                                if (before != after && before.toEntityOrNull(id, sortIndex) != after.toEntityOrNull(id, sortIndex)) break
+                                prefix++
+                            }
+                            if (old == null || old.messages != state.messages || old.messageStartIndex != state.messageStartIndex) {
                                 phase = "delete_message_suffix"
-                                dao.deleteMessagesFrom(plan.id, from)
-                                if (plan.messageRows.isNotEmpty()) {
+                                dao.deleteMessagesFrom(id, state.messageStartIndex + prefix)
+                                for (index in prefix until state.messages.size) {
+                                    phase = "encode_message"
+                                    val row = state.messages[index].toEntityOrNull(id, state.messageStartIndex + index) ?: continue
                                     phase = "write_message"
-                                    dao.insertMessages(plan.messageRows)
+                                    dao.insertMessages(listOf(row))
+                                }
+                            }
+                            if (state.roleplay != null && state.roleplayMessages.revisions != old?.roleplayMessages?.revisions) {
+                                val visibleIds = state.messages.mapTo(mutableSetOf()) { it.id }
+                                for ((messageId, revision) in state.roleplayMessages.revisions) {
+                                    if (messageId !in visibleIds && revision != old?.roleplayMessages?.revisions?.get(messageId)) {
+                                        phase = "write_offscreen_revision"
+                                        val updated = dao.updateMessageContent(id, messageId, revision.content)
+                                        check(updated || old == null) { "Roleplay revision message missing" }
+                                    }
                                 }
                             }
                         }
@@ -201,12 +169,6 @@ internal object AgentConversationStore {
                             ?: current.maxByOrNull { it.value.updatedAt }?.key
                         if (selected == null) dao.deleteState()
                         else dao.insertState(ConversationStateEntity(selectedConversationId = selected))
-                    }
-                    val totalMs = SystemClock.elapsedRealtime() - startedAt
-                    if (totalMs >= SLOW_PERSIST_MS) {
-                        AndroidAgentLogger.warn(
-                            "conversation persist slow: total=${totalMs}ms (encode=${encodeMs}ms) conversations=${current.size}",
-                        )
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -220,60 +182,9 @@ internal object AgentConversationStore {
         }
     }
 
-    /**
-     * journal 编码撞 OOM 时退化到"只存尾部"，而不是让整条落盘失败。
-     *
-     * 失败会让 write-ahead 判定本轮未提交，失败分支会回到主线程重建会话状态——
-     * 在长会话上那就是用户看到的"发消息卡死"。宁可这次少存早期记录。
-     */
-    private fun encodeJournal(journal: List<AgentModelClient.ConversationMessage>): String {
-        encodeJournalOrNull(journal)?.let { return it }
-        val bounded = boundedJournal(journal, maxChars = JOURNAL_MAX_CHARS)
-        encodeJournalOrNull(bounded)?.let {
-            AndroidAgentLogger.warn(
-                "journal encode out of memory, degrade to ${bounded.size}/${journal.size} entries",
-            )
-            return it
-        }
-        val tail = boundedJournal(journal, maxChars = JOURNAL_EMERGENCY_CHARS)
-        AndroidAgentLogger.warn(
-            "journal encode out of memory again, emergency tail ${tail.size}/${journal.size} entries",
-        )
-        return AgentConversationCodec.encodeTranscriptForStorage(tail)
-    }
-
-    private fun encodeJournalOrNull(
-        journal: List<AgentModelClient.ConversationMessage>,
-    ): String? = try {
-        AgentConversationCodec.encodeTranscriptForStorage(journal)
-    } catch (_: OutOfMemoryError) {
-        null
-    }
-
-    private data class PersistPlan(
-        val id: String,
-        val metadata: ConversationEntity?,
-        val history: String?,
-        val journal: String?,
-        val deleteMessagesFrom: Int?,
-        val messageRows: List<ConversationMessageEntity>,
-    )
-
     private suspend fun loadSnapshot(context: Context): Snapshot {
-        val startedAt = SystemClock.elapsedRealtime()
-        val snapshot = loadSnapshotInternal(context)
-        val elapsed = SystemClock.elapsedRealtime() - startedAt
-        if (elapsed >= SLOW_PERSIST_MS) {
-            AndroidAgentLogger.warn(
-                "conversation load slow: ${elapsed}ms conversations=${snapshot.conversationsById.size}",
-            )
-        }
-        return snapshot
-    }
-
-    private suspend fun loadSnapshotInternal(context: Context): Snapshot {
         val dao = EtaDatabase.get(context).conversationDao()
-        val conversations = dao.conversations()
+        val conversations = dao.conversationIndex()
         if (conversations.isEmpty()) {
             return Snapshot(
                 selectedConversationId = null,
@@ -283,79 +194,24 @@ internal object AgentConversationStore {
             )
         }
 
-        // 只为"当前选中"的会话完整还原 journal：其余会话的 journal 动辄几十 MB，
-        // 全量还原会在启动时把堆吃干净（"Failed to allocate 33558536 byte" 的直接来源），
-        // 而且它一进内存就要在每次保存时整段编码。超阈值的先跳过，选中时再补。
-        val selectedRaw = dao.state()?.selectedConversationId
-            ?.takeIf { id -> conversations.any { it.id == id } }
-            ?: conversations.first().id
-        val journalNotLoaded = linkedSetOf<String>()
-        val historyNotLoaded = linkedSetOf<String>()
         val states = linkedMapOf<String, AgentChatHomeUiState>()
         val titles = mutableMapOf<String, String>()
         val updatedAt = mutableMapOf<String, Long>()
-        val unaligned = mutableSetOf<String>()
-
         conversations.forEach { conversation ->
-            val messages = buildList {
-                var offset = 0
-                while (true) {
-                    val page = dao.messagesPage(conversation.id, MESSAGE_LOAD_PAGE_SIZE, offset)
-                    addAll(page)
-                    if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
-                    offset += page.size
-                }
-            }
-            val restored = messages.mapNotNull { it.toMessageOrNull() }
-            if (restored.size != messages.size || messages.withIndex().any { (index, row) -> row.sortIndex != index }) {
-                unaligned += conversation.id
-            }
-            val checkpoint = dao.contextCheckpoint(conversation.id)
-            // 非选中会话的 history 只在真正进入/发送时才需要。载入时一并解析 39 份上下文
-            // 是启动卡在主线程 9 秒的主因，这里先跳过，用的时候再补。
-            val historyJson = checkpoint?.historyJson.orEmpty()
-            val deferHistory = conversation.id != selectedRaw &&
-                declaredTextChars(historyJson) > MAX_EAGER_HISTORY_CHARS
-            if (deferHistory) historyNotLoaded += conversation.id
-            val decodedHistory =
-                if (deferHistory) emptyList() else AgentConversationCodec.decodeTranscript(historyJson)
-            if (!deferHistory && decodedHistory.isEmpty() && restored.isNotEmpty()) {
-                // 上下文检查点缺失/为空时会退化成"全量消息当历史"，压缩成果就此丢失，
-                // 下一轮直接爆上下文。这里留证据，便于判断是没写入还是被覆盖。
-                AndroidAgentLogger.warn(
-                    "context checkpoint empty; history falls back to all messages " +
-                        "(conv=${conversation.id}, messages=${restored.size})",
-                )
-            }
+            val effort = ReasoningEffort.fromWireValue(conversation.reasoningEffort) ?: ReasoningEffort.DEFAULT
+            val character = if (conversation.hasRoleplay) loadCharacterSummary(dao, conversation.id) else null
             states[conversation.id] = AgentChatHomeUiState(
-                roleplay = conversation.roleplayJson.takeIf(String::isNotBlank)?.let { json.decodeFromString<RoleplayBinding>(it) },
-                roleplayMessages = conversation.revisionsJson.takeIf(String::isNotBlank)?.let {
-                    json.decodeFromString<RoleplayMessageState>(it)
-                } ?: RoleplayMessageState(),
-                // 历史库里可能有修复前写下的超大 journal（数十 MB）。载入时就按上限截尾，
-                // 否则它会一直占着堆，下一次整段编码（journal_json）必然 OOM。
-                journal = if (
-                    conversation.id != selectedRaw &&
-                    declaredTextChars(checkpoint?.journalJson.orEmpty()) > MAX_EAGER_JOURNAL_CHARS
-                ) {
-                    journalNotLoaded += conversation.id
-                    emptyList()
-                } else {
-                    boundedJournal(AgentConversationCodec.decodeTranscript(checkpoint?.journalJson))
-                },
-                messages = restored,
-                history = when {
-                    deferHistory -> emptyList()
-                    decodedHistory.isEmpty() -> messages.toLegacyHistory()
-                    else -> decodedHistory
-                },
-                appliedRuntimeRunIds = conversation.appliedRuntimeRunIdsJson.toStringList(),
-                input = "",
-                isStreaming = false,
-                thinkingEnabled = conversation.reasoningEffortValue.enablesReasoning,
-                reasoningEffort = conversation.reasoningEffortValue,
-                modelId = conversation.modelId,
-            ).let(RoleplayConversationReducer::decorate)
+                messages = listOfNotNull(conversation.messageId?.let { messageId ->
+                    ConversationMessageEntity(
+                        id = messageId, conversationId = conversation.id, sortIndex = 0,
+                        type = conversation.messageType.orEmpty(), content = conversation.messagePreview.orEmpty(),
+                        toolName = conversation.toolName,
+                    ).toMessageOrNull()
+                }),
+                input = "", isStreaming = false, thinkingEnabled = effort.enablesReasoning,
+                reasoningEffort = effort, modelId = conversation.modelId, isConversationLoaded = false,
+                conversationCharacterName = character?.first, conversationCharacterAvatarPath = character?.second,
+            )
             titles[conversation.id] = conversation.title.takeUnless { it == LEGACY_UNNAMED_TITLE }.orEmpty()
             updatedAt[conversation.id] = conversation.updatedAt
         }
@@ -363,6 +219,11 @@ internal object AgentConversationStore {
         val selected = dao.state()?.selectedConversationId
             ?.takeIf { it in states }
             ?: states.keys.first()
+        val loaded = loadConversation(context, selected)
+        if (loaded != null) states[selected] = loaded
+        val unaligned = if (loaded != null &&
+            dao.nextMessageIndex(selected) != loaded.messageStartIndex + loaded.messages.size
+        ) setOf(selected) else emptySet()
 
         return Snapshot(
             selectedConversationId = selected,
@@ -370,20 +231,159 @@ internal object AgentConversationStore {
             titles = titles,
             updatedAt = updatedAt,
             unalignedConversationIds = unaligned,
-            journalNotLoadedIds = journalNotLoaded,
-            historyNotLoadedIds = historyNotLoaded,
         )
     }
 
-    /** 分块引用串里写着总字符数；没走分块的直接看长度。用于载入前判断体积，不必先读回内容。 */
-    private fun declaredTextChars(stored: String): Int {
-        if (stored.isEmpty()) return 0
-        if (!stored.startsWith(ChunkedTextDao.REFERENCE_PREFIX)) return stored.length
-        return stored.removePrefix(ChunkedTextDao.REFERENCE_PREFIX)
-            .substringAfter(':')
-            .toIntOrNull()
-            ?: Int.MAX_VALUE
+    data class MessagePage(
+        val messages: List<AgentChatMessageUi>,
+        val startIndex: Int,
+        val hasEarlierMessages: Boolean,
+    )
+
+    suspend fun loadConversation(context: Context, conversationId: String): AgentChatHomeUiState? = withContext(Dispatchers.IO) {
+        val database = EtaDatabase.get(context.applicationContext)
+        database.withTransaction {
+            val dao = database.conversationDao()
+            val conversation = dao.conversation(conversationId) ?: return@withTransaction null
+            val page = loadMessagePage(dao, conversationId, Int.MAX_VALUE)
+            val checkpoint = dao.contextCheckpointRow(conversationId)
+            val journal = decodeCheckpoint(dao, conversationId, "journal", checkpoint?.journalJson)
+            val history = if (checkpoint != null && checkpoint.historyJson == checkpoint.journalJson &&
+                !checkpoint.historyJson.startsWith(io.github.mangi.eta.data.db.ChunkedTextDao.REFERENCE_PREFIX)
+            ) journal else decodeCheckpoint(dao, conversationId, "history", checkpoint?.historyJson)
+            val state = AgentChatHomeUiState(
+                roleplay = conversation.roleplayJson.takeIf(String::isNotBlank)?.let { json.decodeFromString<RoleplayBinding>(it) },
+                roleplayMessages = conversation.revisionsJson.takeIf(String::isNotBlank)?.let {
+                    json.decodeFromString<RoleplayMessageState>(it)
+                } ?: RoleplayMessageState(),
+                journal = journal,
+                messages = page.messages,
+                history = history.ifEmpty { loadLegacyHistory(dao, conversationId) },
+                appliedRuntimeRunIds = conversation.appliedRuntimeRunIdsJson.toStringList(),
+                input = "", isStreaming = false,
+                thinkingEnabled = conversation.reasoningEffortValue.enablesReasoning,
+                reasoningEffort = conversation.reasoningEffortValue,
+                modelId = conversation.modelId,
+                messageStartIndex = page.startIndex,
+                hasEarlierMessages = page.hasEarlierMessages,
+            )
+            RoleplayConversationReducer.decorate(state.copy(roleplayOriginalContents =
+                loadRoleplayMessageContents(dao, conversationId, RoleplayConversationReducer.requiredOriginalContentIds(state))))
+        }
     }
+
+    suspend fun loadEarlierMessages(context: Context, conversationId: String, before: Int): MessagePage =
+        withContext(Dispatchers.IO) {
+            val database = EtaDatabase.get(context.applicationContext)
+            database.withTransaction { loadMessagePage(database.conversationDao(), conversationId, before) }
+        }
+
+    suspend fun loadRecentMessages(context: Context, conversationId: String): MessagePage =
+        loadEarlierMessages(context, conversationId, Int.MAX_VALUE)
+
+    fun shouldReleaseEarlierMessages(messageCount: Int): Boolean = messageCount > MESSAGE_LOAD_PAGE_SIZE * 3
+
+    suspend fun loadRoleplayMessageContents(context: Context, conversationId: String, ids: Set<String>): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            val database = EtaDatabase.get(context.applicationContext)
+            database.withTransaction { loadRoleplayMessageContents(database.conversationDao(), conversationId, ids) }
+        }
+
+    private suspend fun loadRoleplayMessageContents(dao: ConversationDao, conversationId: String, ids: Set<String>): Map<String, String> =
+        buildMap {
+            for (page in ids.chunked(MESSAGE_LOAD_PAGE_SIZE)) {
+                dao.messageContents(conversationId, page).forEach { row ->
+                    put(row.id, dao.restoreText("conversation_messages", row.id, "content", row.content))
+                }
+            }
+        }
+
+    private suspend fun loadMessagePage(dao: ConversationDao, conversationId: String, before: Int): MessagePage {
+        val rows = dao.messagesBefore(conversationId, before, MESSAGE_LOAD_PAGE_SIZE)
+        val startIndex = rows.firstOrNull()?.sortIndex ?: 0
+        return MessagePage(rows.mapNotNull { it.toMessageOrNull() }, startIndex, dao.hasMessagesBefore(conversationId, startIndex))
+    }
+
+    suspend fun loadAllMessages(context: Context, conversationId: String): List<AgentChatMessageUi> =
+        withContext(Dispatchers.IO) {
+            val database = EtaDatabase.get(context.applicationContext)
+            database.withTransaction {
+                val dao = database.conversationDao()
+                buildList {
+                    var offset = 0
+                    while (true) {
+                        val page = dao.messagesPage(conversationId, MESSAGE_LOAD_PAGE_SIZE, offset)
+                        page.mapNotNullTo(this) { it.toMessageOrNull() }
+                        if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
+                        offset += page.size
+                    }
+                }
+            }
+        }
+
+    suspend fun searchConversationIds(
+        context: Context,
+        query: String,
+        matchingNoticeCodes: List<SystemNoticeCode> = emptyList(),
+    ): Set<String> = ConversationSearchRepository.search(context, query, matchingNoticeCodes.map { it.wireValue })
+
+    fun unloadConversation(state: AgentChatHomeUiState): AgentChatHomeUiState = state.copy(
+        messages = listOfNotNull(state.messages.lastOrNull()?.let { message -> when (message) {
+            is UserMessageUi -> message.copy(content = message.content.take(256), images = emptyList())
+            is AgentMessageUi -> message.copy(content = message.content.take(256), searchSuggestionsHtml = emptyList())
+            is ThinkingMessageUi -> message.copy(content = message.content.take(256))
+            is ToolActivityMessageUi -> message.copy(
+                argumentsSummary = message.argumentsSummary.take(256), command = message.command?.take(256),
+                resultSummary = message.resultSummary?.take(256),
+            )
+            else -> message
+        } }),
+        history = emptyList(), journal = emptyList(), roleplay = null, roleplayMessages = RoleplayMessageState(),
+        appliedRuntimeRunIds = emptyList(), isConversationLoaded = false, messageStartIndex = 0, hasEarlierMessages = false,
+        conversationCharacterName = state.roleplay?.characterName ?: state.conversationCharacterName,
+        conversationCharacterAvatarPath = state.roleplay?.avatarPath ?: state.conversationCharacterAvatarPath,
+        roleplayOriginalContents = emptyMap(),
+    )
+
+    private suspend fun loadCharacterSummary(dao: ConversationDao, conversationId: String): Pair<String?, String?>? {
+        val stored = dao.roleplayJsonRow(conversationId)?.takeIf { it.isNotBlank() } ?: return null
+        return dao.openTextStream("conversations", conversationId, "roleplay", stored).use { stream ->
+            JsonReader(stream.reader(Charsets.UTF_8)).use { reader ->
+                var name: String? = null
+                var avatarPath: String? = null
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "characterName" -> name = reader.nextString()
+                        "avatarPath" -> if (reader.peek() == JsonToken.NULL) reader.nextNull() else avatarPath = reader.nextString()
+                        else -> reader.skipValue()
+                    }
+                }
+                reader.endObject()
+                check(reader.peek() == JsonToken.END_DOCUMENT) { "Invalid roleplay payload trailing data" }
+                name to avatarPath
+            }
+        }
+    }
+
+    private fun decodeCheckpoint(dao: ConversationDao, conversationId: String, field: String, stored: String?): List<AgentModelClient.ConversationMessage> {
+        if (stored.isNullOrBlank()) return emptyList()
+        return dao.openTextStream("conversation_context_checkpoints", conversationId, field, stored).use { stream ->
+            AgentConversationCodec.decodeTranscript(stream)
+        }
+    }
+
+    private suspend fun loadLegacyHistory(dao: ConversationDao, conversationId: String): List<AgentModelClient.ConversationMessage> =
+        buildList {
+            var offset = 0
+            while (true) {
+                val page = dao.legacyMessageRowsPage(conversationId, MESSAGE_LOAD_PAGE_SIZE, offset)
+                    .map { dao.restoreMessage(it) }
+                addAll(page.toLegacyHistory())
+                if (page.size < MESSAGE_LOAD_PAGE_SIZE) break
+                offset += page.size
+            }
+        }
 
     private val ConversationMetadata.reasoningEffortValue: ReasoningEffort
         get() = ReasoningEffort.fromWireValue(reasoningEffort) ?: ReasoningEffort.DEFAULT
@@ -567,7 +567,6 @@ internal object AgentConversationStore {
             }
         }
 
-    private const val SLOW_PERSIST_MS = 500L
     private const val TYPE_USER = "user"
     private const val TYPE_ASSISTANT = "assistant"
     private const val TYPE_SYSTEM_NOTICE = "system_notice"
@@ -575,9 +574,5 @@ internal object AgentConversationStore {
     private const val TYPE_TOOL = "tool"
     private const val TYPE_TOOL_SUMMARY = "tool_summary"
     private const val MESSAGE_LOAD_PAGE_SIZE = 128
-    /** 非选中会话的 journal 超过这个体积就跳过还原，选中时再补。 */
-    private const val MAX_EAGER_JOURNAL_CHARS = 512 * 1024
-    /** 同上，history 的跳过阈值。 */
-    private const val MAX_EAGER_HISTORY_CHARS = 256 * 1024
     private const val LEGACY_UNNAMED_TITLE = "新对话"
 }

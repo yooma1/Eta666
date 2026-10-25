@@ -64,11 +64,9 @@ internal class AgentContextSession(
 
     fun compact(force: Boolean = false, final: Boolean = false) {
         val before = effectiveInputTokens()
-        if (config.bindsAnthropicSignatures() &&
-            AnthropicEphemeralState.hasPendingToolResponse(messages)
-        ) {
+        if (config.signedToolRoundLocked(messages)) {
             if (force) {
-                throw AgentContextCompactor.signedAnthropicToolRoundFailure()
+                throw SignedToolContext.compactionFailure(messages)
             }
             return
         }

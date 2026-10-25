@@ -19,13 +19,11 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.graphics.createBitmap
 import io.github.mangi.eta.agent.media.AgentImageCodec
 import io.github.mangi.eta.agent.tool.requiredText
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -78,27 +76,16 @@ internal data class BrowserToolResult(
 )
 
 /**
- * Eta 的共享 Agent 浏览器。
+ * 同一会话内由 Agent 与用户共享的浏览器页面。
  *
  * WebView 可以离屏工作，也可以临时挂到 App 的浏览器页面供用户接管。
  */
 // 共享 WebView 必须跨工具调用存活；Activity 容器只在浏览器页面可见时持有，并在 dispose 时解绑。
 @SuppressLint("StaticFieldLeak")
-internal object AgentBrowserSession {
-    private const val TOOL_NAME = "browser_use"
-    private const val DEFAULT_TEXT_CHARS = 8_000
-    private const val MAX_TEXT_CHARS = 12_000
-    private const val NAVIGATION_TIMEOUT_MS = 25_000L
-    private const val JAVASCRIPT_TIMEOUT_MS = 8_000L
-    private const val POST_ACTION_TIMEOUT_MS = 10_000L
-    private const val OFFSCREEN_VIEWPORT_MAX_WIDTH = 1_280
-    private const val OFFSCREEN_VIEWPORT_MAX_HEIGHT = 2_400
-    private const val PREVIEW_MAX_WIDTH = 480
-    private const val PREVIEW_MAX_HEIGHT = 900
-    private const val PREVIEW_QUALITY = 60
-    private const val MAX_RUN_JS_CHARS = 200_000
-    private const val USERSCRIPT_IDLE_DELAY_MS = 150L
-
+internal class AgentBrowserSession(
+    private val onIdle: () -> Unit = {},
+    private val isDataClearing: () -> Boolean = { false },
+) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val operationLock = ReentrantLock()
     private val interrupted = AtomicBoolean(false)
@@ -168,8 +155,10 @@ internal object AgentBrowserSession {
     @Volatile
     private var activeAgentRunId: String? = null
 
+    @Volatile
+    private var closed = false
+
     fun initialize(context: Context) {
-        UserScriptEngine.initialize(context)
         if (appContext == null) {
             synchronized(this) {
                 if (appContext == null) appContext = context.applicationContext
@@ -182,12 +171,14 @@ internal object AgentBrowserSession {
         args: JSONObject,
         runId: String,
         toolCallId: String,
+        checkCancellation: () -> Unit = {},
     ): BrowserToolResult {
         val result = executeInternal(
             context = context,
             args = args,
             userInitiated = false,
             agentRunId = runId,
+            checkCancellation = checkCancellation,
         )
         val succeeded = runCatching { JSONObject(result.content).optBoolean("ok", false) }
             .getOrDefault(false)
@@ -232,18 +223,20 @@ internal object AgentBrowserSession {
     fun resetFromUser(): BrowserToolResult {
         val context = appContext
             ?: return errorResult("reset", "BROWSER_NOT_INITIALIZED", "浏览器尚未初始化")
-        return operationLock.withLock {
-            interrupted.set(true)
-            currentLoadWaiter?.complete(LoadOutcome(false, "CANCELLED", "操作已取消"))
-            callOnMain {
-                destroyWebViewOnMain()
-                CookieManager.getInstance().removeAllCookies(null)
-                CookieManager.getInstance().flush()
-                WebStorage.getInstance().deleteAllData()
-                clearSessionStateOnMain()
+        return try {
+            operationLock.withLock {
+                if (closed) return@withLock errorResult("reset", "BROWSER_SESSION_CLOSED", "浏览器会话已关闭")
+                interrupted.set(true)
+                currentLoadWaiter?.complete(LoadOutcome(false, "CANCELLED", "操作已取消"))
+                callOnMain {
+                    destroyWebViewOnMain()
+                    clearSessionStateOnMain()
+                }
+                initialize(context)
+                toolResult(baseEnvelope("reset", ok = true, status = "ok"))
             }
-            initialize(context)
-            toolResult(baseEnvelope("reset", ok = true, status = "ok"))
+        } finally {
+            onIdle()
         }
     }
 
@@ -269,6 +262,7 @@ internal object AgentBrowserSession {
     }
 
     fun attachTo(container: ViewGroup, hostContext: Context) {
+        if (closed) return
         initialize(hostContext)
         val wasAlreadyControlling = userControlActive
         userControlActive = true
@@ -292,7 +286,22 @@ internal object AgentBrowserSession {
                 attachedContainer = null
                 appContext?.let { contextWrapper?.baseContext = it }
                 publishSnapshotOnMain()
+                onIdle()
             }
+        }
+    }
+
+    /** 主线程只尝试回收空闲页面，不等待正在执行的导航或脚本。 */
+    internal fun releaseIdlePage(dispose: Boolean = false): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (userControlActive || !operationLock.tryLock()) return false
+        return try {
+            if (dispose) closed = true
+            destroyWebViewOnMain()
+            clearSessionStateOnMain()
+            true
+        } finally {
+            operationLock.unlock()
         }
     }
 
@@ -326,6 +335,7 @@ internal object AgentBrowserSession {
         args: JSONObject,
         userInitiated: Boolean,
         agentRunId: String? = null,
+        checkCancellation: () -> Unit = {},
     ): BrowserToolResult {
         initialize(context)
         val action = args.optString("action").trim().lowercase(Locale.ROOT)
@@ -335,10 +345,16 @@ internal object AgentBrowserSession {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return errorResult(action, "MAIN_THREAD_CALL", "浏览器操作不能阻塞主线程")
         }
-
-        return operationLock.withLock {
+        checkCancellation()
+        if (isDataClearing()) return errorResult(action, "BROWSER_DATA_CLEARING", "正在清除浏览器数据，请稍后再试", "blocked")
+        // 等待另一动作时也响应本 run 的取消，不能获得锁后清掉已经到达的取消信号。
+        while (!operationLock.tryLock(100L, TimeUnit.MILLISECONDS)) checkCancellation()
+        return try {
+            checkCancellation()
+            if (closed) return errorResult(action, "BROWSER_SESSION_CLOSED", "浏览器会话已关闭")
+            if (isDataClearing()) return errorResult(action, "BROWSER_DATA_CLEARING", "正在清除浏览器数据，请稍后再试", "blocked")
             if (!userInitiated && userControlActive) {
-                return@withLock errorResult(
+                return errorResult(
                     action = action,
                     code = "USER_CONTROL_ACTIVE",
                     message = "用户正在接管浏览器，请等待用户离开浏览器页面后再继续",
@@ -350,11 +366,12 @@ internal object AgentBrowserSession {
             activeOperationEpoch = epoch
             activeActionIsUserInitiated = userInitiated
             activeAgentRunId = agentRunId.takeUnless { userInitiated }
-            callOnMain {
-                currentError = null
-                publishSnapshotOnMain()
-            }
             try {
+                checkCancellation()
+                callOnMain {
+                    currentError = null
+                    publishSnapshotOnMain()
+                }
                 runCatching {
                     when (action) {
                         "navigate" -> navigate(args)
@@ -370,17 +387,6 @@ internal object AgentBrowserSession {
                         "go_forward" -> historyNavigation(action, backwards = false)
                         "reload" -> reload()
                         "wait_for_selector" -> waitForSelector(args)
-                        "run_js" -> runJs(args)
-                        "list_scripts" -> listScripts()
-                        "add_script" -> addScript(args)
-                        "toggle_script" -> toggleScript(args)
-                        "remove_script" -> removeScript(args)
-                        "debug_scripts" -> debugScripts()
-                        "set_intercept" -> setIntercept(args)
-                        "add_intercept_replace" -> addInterceptReplace(args)
-                        "clear_intercept_replace" -> clearInterceptReplace(args)
-                        "list_requests" -> listInterceptRequests(args)
-                        "clear_requests" -> clearInterceptRecords()
                         else -> throw BrowserFailure("INVALID_ACTION", "浏览器 action 无效")
                     }
                 }.getOrElse { throwable -> failureResult(action, throwable) }
@@ -389,6 +395,9 @@ internal object AgentBrowserSession {
                 activeActionIsUserInitiated = false
                 if (activeAgentRunId == agentRunId) activeAgentRunId = null
             }
+        } finally {
+            operationLock.unlock()
+            onIdle()
         }
     }
 
@@ -535,10 +544,7 @@ internal object AgentBrowserSession {
     private fun pageInfo(): BrowserToolResult {
         val view = requirePage()
         val value = evaluateObject(view, BrowserDomScripts.pageInfo())
-        return toolResult(
-            mergeValue(baseEnvelope("get_page_info", true, "ok"), value)
-                .put("userscripts", UserScriptEngine.pageStatus(currentUrl))
-        )
+        return toolResult(mergeValue(baseEnvelope("get_page_info", true, "ok"), value))
     }
 
     private fun historyNavigation(action: String, backwards: Boolean): BrowserToolResult {
@@ -605,99 +611,6 @@ internal object AgentBrowserSession {
         )
     }
 
-    /** run_js：在当前页面上下文执行任意 JS，返回 JSON 安全化的结果或 JS 错误信息。 */
-    private fun runJs(args: JSONObject): BrowserToolResult {
-        val code = args.optString("code").trim()
-        if (code.isBlank()) throw BrowserFailure("INVALID_ARGUMENT", "run_js 缺少 code")
-        require(code.length <= MAX_RUN_JS_CHARS) { "code 超过 ${MAX_RUN_JS_CHARS / 1000}k 字符上限" }
-        val view = requirePage()
-        val value = evaluateObject(view, BrowserDomScripts.runJs(code))
-        val envelope = baseEnvelope("run_js", true, "ok")
-        value.optString("js_error").takeIf(String::isNotBlank)?.let { envelope.put("js_error", it) }
-        val result = value.opt("value")
-        if (result != null && result !== JSONObject.NULL) envelope.put("result", result)
-        return toolResult(envelope)
-    }
-
-    private fun listScripts(): BrowserToolResult {
-        val items = JSONArray()
-        UserScriptEngine.listScripts().forEach { script ->
-            items.put(
-                JSONObject()
-                    .put("id", script.id)
-                    .put("name", script.name)
-                    .put("version", script.version)
-                    .put("description", script.description)
-                    .put("matches", JSONArray(script.matches))
-                    .put("includes", JSONArray(script.includes))
-                    .put("run_at", script.runAt)
-                    .put("enabled", script.enabled)
-                    .put("source_chars", script.source.length)
-            )
-        }
-        return toolResult(
-            baseEnvelope("list_scripts", true, "ok")
-                .put("scripts", items)
-                .put("count", items.length())
-        )
-    }
-
-    private fun addScript(args: JSONObject): BrowserToolResult {
-        val url = args.optString("url").trim()
-        val inline = args.optString("source")
-        val (script, warnings) = when {
-            inline.isNotBlank() -> UserScriptEngine.addScript(inline)
-            url.isNotBlank() -> UserScriptEngine.addScriptFromUrl(url)
-            else -> throw BrowserFailure("INVALID_ARGUMENT", "add_script 需要 source 或 url")
-        }
-        return toolResult(
-            baseEnvelope("add_script", true, "ok")
-                .put(
-                    "script",
-                    JSONObject()
-                        .put("id", script.id)
-                        .put("name", script.name)
-                        .put("version", script.version)
-                        .put("run_at", script.runAt)
-                        .put("matches", JSONArray(script.matches))
-                        .put("includes", JSONArray(script.includes))
-                        .put("enabled", script.enabled)
-                )
-                .put("warnings", JSONArray(warnings))
-        )
-    }
-
-    private fun toggleScript(args: JSONObject): BrowserToolResult {
-        val scriptId = args.optString("script_id").trim()
-        if (scriptId.isBlank()) throw BrowserFailure("INVALID_ARGUMENT", "toggle_script 缺少 script_id")
-        val updated = if (args.has("enabled") && !args.isNull("enabled")) {
-            UserScriptEngine.setEnabled(scriptId, args.optBoolean("enabled"))
-        } else {
-            UserScriptEngine.toggleEnabled(scriptId)
-        } ?: throw BrowserFailure("SCRIPT_NOT_FOUND", "未找到脚本 $scriptId")
-        return toolResult(
-            baseEnvelope("toggle_script", true, "ok")
-                .put("script_id", updated.id)
-                .put("name", updated.name)
-                .put("enabled", updated.enabled)
-        )
-    }
-
-    private fun removeScript(args: JSONObject): BrowserToolResult {
-        val scriptId = args.optString("script_id").trim()
-        if (scriptId.isBlank()) throw BrowserFailure("INVALID_ARGUMENT", "remove_script 缺少 script_id")
-        if (!UserScriptEngine.removeScript(scriptId)) {
-            throw BrowserFailure("SCRIPT_NOT_FOUND", "未找到脚本 $scriptId")
-        }
-        return toolResult(
-            baseEnvelope("remove_script", true, "ok").put("script_id", scriptId)
-        )
-    }
-
-    /** debug_scripts：用户脚本链路诊断——登记、令牌、注入记录全量可见。 */
-    private fun debugScripts(): BrowserToolResult =
-        toolResult(baseEnvelope("debug_scripts", true, "ok").put("debug", UserScriptEngine.debugState()))
-
     private fun targetFrom(args: JSONObject): BrowserTarget {
         val selector = validatedSelector(args, required = false)
         val hasX = args.has("coordinate_x") && !args.isNull("coordinate_x")
@@ -758,13 +671,13 @@ internal object AgentBrowserSession {
     }
 
     private fun throwIfInterrupted() {
-        if (interrupted.get() || activeOperationEpoch == 0L) {
+        if (isDataClearing() || interrupted.get() || activeOperationEpoch == 0L) {
             throw BrowserFailure("CANCELLED", "操作已取消", "cancelled")
         }
     }
 
     private fun requireActiveOperation(epoch: Long) {
-        if (epoch == 0L || activeOperationEpoch != epoch || interrupted.get()) {
+        if (isDataClearing() || epoch == 0L || activeOperationEpoch != epoch || interrupted.get()) {
             throw BrowserFailure("CANCELLED", "操作已取消", "cancelled")
         }
     }
@@ -791,10 +704,7 @@ internal object AgentBrowserSession {
                     settings.displayZoomControls = false
                     webViewClient = BrowserClient()
                     webChromeClient = BrowserChrome()
-                    // 用户脚本（油猴）GM_* API 桥；方法级令牌校验见 EtaScriptBridge。
-                    addJavascriptInterface(EtaScriptBridge(), "EtaGM")
                 }
-                UserScriptEngine.attachHost(view)
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
                 contextWrapper = wrapper
@@ -808,6 +718,8 @@ internal object AgentBrowserSession {
     }
 
     private fun attachWebViewOnMain(view: WebView, container: ViewGroup) {
+        // 前台跟随窗口的硬件加速，不能继承离屏绘制遗留的软件图层。
+        view.setLayerType(View.LAYER_TYPE_NONE, null)
         (view.parent as? ViewGroup)?.takeIf { it !== container }?.removeView(view)
         if (view.parent == null) {
             container.removeAllViews()
@@ -838,12 +750,10 @@ internal object AgentBrowserSession {
         (view.parent as? ViewGroup)?.removeView(view)
         runCatching { view.stopLoading() }
         runCatching { view.clearHistory() }
-        runCatching { view.clearCache(true) }
         runCatching { view.clearFormData() }
         runCatching { view.destroy() }
         webView = null
         contextWrapper = null
-        UserScriptEngine.attachHost(null)
     }
 
     private fun clearSessionStateOnMain() {
@@ -867,12 +777,12 @@ internal object AgentBrowserSession {
         val epoch = activeOperationEpoch
         val future = CompletableFuture<String>()
         mainHandler.post {
-            if (webView !== view || interrupted.get() || activeOperationEpoch != epoch || epoch == 0L) {
+            if (isDataClearing() || webView !== view || interrupted.get() || activeOperationEpoch != epoch || epoch == 0L) {
                 future.completeExceptionally(BrowserFailure("CANCELLED", "操作已取消", "cancelled"))
             } else {
                 runCatching {
                     view.evaluateJavascript(BrowserDomScripts.wrap(body)) { raw ->
-                        if (!interrupted.get() && activeOperationEpoch == epoch) {
+                        if (!isDataClearing() && !interrupted.get() && activeOperationEpoch == epoch) {
                             future.complete(raw ?: "null")
                         } else {
                             future.completeExceptionally(BrowserFailure("CANCELLED", "操作已取消", "cancelled"))
@@ -940,7 +850,7 @@ internal object AgentBrowserSession {
             ) else 1f
             val width = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
             val height = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
-            if (view.windowToken == null) view.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            // Bitmap Canvas 已决定截图采用软件绘制，不能修改共享 WebView 的持久图层类型。
             val captured = createBitmap(width, height)
             try {
                 Canvas(captured).also { canvas ->
@@ -1103,22 +1013,9 @@ internal object AgentBrowserSession {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
     }
 
-    private class BrowserClient : WebViewClient() {
-        override fun shouldInterceptRequest(
-            view: WebView,
-            request: WebResourceRequest,
-        ): WebResourceResponse? {
-            val url = request.url?.toString()
-            if (url != null && interceptEnabled) {
-                runCatching {
-                    recordIntercept(url, request.method, request.isForMainFrame)
-                    matchInterceptReplace(url)?.let { return it.toResponse() }
-                }
-            }
-            return super.shouldInterceptRequest(view, request)
-        }
-
+    private inner class BrowserClient : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+            if (webView !== view) return
             currentUrl = url.orEmpty()
             currentHost = hostOf(currentUrl)
             currentTitle = view.title.orEmpty()
@@ -1128,13 +1025,10 @@ internal object AgentBrowserSession {
             currentPageVisible = false
             currentProgress = 0
             publishSnapshotOnMain()
-            // document-start 用户脚本：WebView 只能在 onPageStarted 尽早注入，尽力而为。
-            if (!url.isNullOrBlank()) {
-                runCatching { UserScriptEngine.injectOnMain(view, url, UserScriptRules.RUN_AT_START) }
-            }
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
+            if (webView !== view) return
             currentUrl = url.orEmpty()
             currentHost = hostOf(currentUrl)
             committedMainFrameUrl = currentUrl
@@ -1144,30 +1038,17 @@ internal object AgentBrowserSession {
             currentProgress = 100
             publishSnapshotOnMain()
             currentLoadWaiter?.complete(LoadOutcome(true, "OK", ""))
-            // document-end 与 document-idle 用户脚本。
-            if (!url.isNullOrBlank()) {
-                runCatching { UserScriptEngine.injectOnMain(view, url, UserScriptRules.RUN_AT_END) }
-                mainHandler.postDelayed({
-                    runCatching {
-                        if (webView === view && currentUrl == url) {
-                            UserScriptEngine.injectOnMain(view, url, UserScriptRules.RUN_AT_IDLE)
-                        }
-                    }
-                }, USERSCRIPT_IDLE_DELAY_MS)
-            }
         }
 
         override fun onPageCommitVisible(view: WebView, url: String?) {
+            if (webView !== view) return
             committedMainFrameUrl = url.orEmpty()
             currentPageVisible = true
             publishSnapshotOnMain()
-            // provisional 阶段 onPageStarted 的 document-start 注入可能被 Chromium 丢弃，这里幂等补一次。
-            if (!url.isNullOrBlank()) {
-                runCatching { UserScriptEngine.injectOnMain(view, url, UserScriptRules.RUN_AT_START) }
-            }
         }
 
         override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+            if (webView !== view) return
             currentUrl = url.orEmpty()
             currentHost = hostOf(currentUrl)
             currentTitle = view.title.orEmpty()
@@ -1175,7 +1056,7 @@ internal object AgentBrowserSession {
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-            if (!request.isForMainFrame) return
+            if (webView !== view || !request.isForMainFrame) return
             setNavigationErrorOnMain("NETWORK_ERROR", "页面加载失败，请检查网络连接")
         }
 
@@ -1184,7 +1065,7 @@ internal object AgentBrowserSession {
             request: WebResourceRequest,
             errorResponse: WebResourceResponse,
         ) {
-            if (!request.isForMainFrame) return
+            if (webView !== view || !request.isForMainFrame) return
             currentHttpStatus = errorResponse.statusCode
             if (errorResponse.statusCode >= 400) {
                 currentError = "网页返回 HTTP ${errorResponse.statusCode}"
@@ -1193,6 +1074,7 @@ internal object AgentBrowserSession {
         }
 
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+            if (webView !== view) return true
             mainHandler.post {
                 if (webView === view) {
                     destroyWebViewOnMain()
@@ -1208,15 +1090,17 @@ internal object AgentBrowserSession {
         }
     }
 
-    private class BrowserChrome : WebChromeClient() {
+    private inner class BrowserChrome : WebChromeClient() {
         override fun onReceivedTitle(view: WebView, title: String?) {
+            if (webView !== view) return
             currentTitle = title.orEmpty()
             publishSnapshotOnMain()
         }
 
         override fun onProgressChanged(view: WebView, newProgress: Int) {
+            if (webView !== view) return
             currentProgress = newProgress.coerceIn(0, 100)
-            currentLoading = newProgress < 100
+            // 进度回调可能在主页面结束后继续到达，不能反复切换导航的加载状态。
             publishSnapshotOnMain()
         }
     }
@@ -1259,139 +1143,33 @@ internal object AgentBrowserSession {
         val status: String = "error",
     ) : RuntimeException(message)
 
-    // ── 请求拦截与改包（Web 渗透基座：观察请求 + 响应替换）──────────────────
-    private const val MAX_INTERCEPT_RECORDS = 100
-
-    private val interceptLock = Any()
-
-    @Volatile
-    private var interceptEnabled = false
-    private val interceptRecords = ArrayDeque<JSONObject>()
-    private val interceptReplaceRules = mutableListOf<InterceptReplaceRule>()
-
-    private data class InterceptReplaceRule(
-        val match: String,
-        val mimeType: String,
-        val body: ByteArray,
-        val encoding: String,
-        val statusCode: Int,
-    ) {
-        fun toResponse(): WebResourceResponse {
-            val response = WebResourceResponse(mimeType, encoding, ByteArrayInputStream(body))
-            if (statusCode != 200) response.setStatusCodeAndReasonPhrase(statusCode, "Eta")
-            return response
-        }
-    }
-
-    private fun recordIntercept(url: String, method: String?, mainFrame: Boolean) {
-        val record = JSONObject()
-            .put("url", url)
-            .put("method", method ?: "GET")
-            .put("main_frame", mainFrame)
-            .put("ts", System.currentTimeMillis())
-        synchronized(interceptLock) {
-            interceptRecords.addLast(record)
-            while (interceptRecords.size > MAX_INTERCEPT_RECORDS) interceptRecords.removeFirst()
-        }
-    }
-
-    private fun matchInterceptReplace(url: String): InterceptReplaceRule? =
-        synchronized(interceptLock) {
-            interceptReplaceRules.firstOrNull { it.match.isNotEmpty() && url.contains(it.match) }
-        }
-
-    private fun setIntercept(args: JSONObject): BrowserToolResult {
-        interceptEnabled = args.optBoolean("enabled", true)
-        return toolResult(
-            baseEnvelope("set_intercept", true, "ok")
-                .put("intercept_enabled", interceptEnabled)
+    private companion object {
+        private const val TOOL_NAME = "browser_use"
+        private const val DEFAULT_TEXT_CHARS = 8_000
+        private const val MAX_TEXT_CHARS = 12_000
+        private const val NAVIGATION_TIMEOUT_MS = 25_000L
+        private const val JAVASCRIPT_TIMEOUT_MS = 8_000L
+        private const val POST_ACTION_TIMEOUT_MS = 10_000L
+        private const val OFFSCREEN_VIEWPORT_MAX_WIDTH = 1_280
+        private const val OFFSCREEN_VIEWPORT_MAX_HEIGHT = 2_400
+        private const val PREVIEW_MAX_WIDTH = 480
+        private const val PREVIEW_MAX_HEIGHT = 900
+        private const val PREVIEW_QUALITY = 60
+        private val SUPPORTED_ACTIONS = setOf(
+            "navigate",
+            "get_readable",
+            "get_text",
+            "find_elements",
+            "click",
+            "type",
+            "scroll",
+            "screenshot",
+            "get_page_info",
+            "go_back",
+            "go_forward",
+            "reload",
+            "wait_for_selector",
         )
     }
-
-    private fun addInterceptReplace(args: JSONObject): BrowserToolResult {
-        val match = args.optString("match").trim()
-        val body = args.optString("body")
-        if (match.isEmpty() || body.isEmpty()) {
-            throw BrowserFailure("INVALID_ARGUMENT", "add_intercept_replace 需要 match 与 body")
-        }
-        val mime = args.optString("mime_type").ifBlank { "text/html" }
-        val encoding = args.optString("encoding").ifBlank { "utf-8" }
-        val status = args.optInt("status", 200).coerceIn(100, 599)
-        synchronized(interceptLock) {
-            interceptReplaceRules.removeAll { it.match == match }
-            interceptReplaceRules.add(
-                InterceptReplaceRule(match, mime, body.toByteArray(Charsets.UTF_8), encoding, status)
-            )
-        }
-        return toolResult(
-            baseEnvelope("add_intercept_replace", true, "ok")
-                .put("match", match)
-                .put("rules", synchronized(interceptLock) { interceptReplaceRules.size })
-        )
-    }
-
-    private fun clearInterceptReplace(args: JSONObject): BrowserToolResult {
-        val match = args.optString("match").trim()
-        val removed = synchronized(interceptLock) {
-            if (match.isEmpty()) {
-                val n = interceptReplaceRules.size
-                interceptReplaceRules.clear()
-                n
-            } else {
-                val before = interceptReplaceRules.size
-                interceptReplaceRules.removeAll { it.match == match }
-                before - interceptReplaceRules.size
-            }
-        }
-        return toolResult(
-            baseEnvelope("clear_intercept_replace", true, "ok").put("removed", removed)
-        )
-    }
-
-    private fun listInterceptRequests(args: JSONObject): BrowserToolResult {
-        val limit = args.optInt("limit", 50).coerceIn(1, MAX_INTERCEPT_RECORDS)
-        val items = JSONArray()
-        synchronized(interceptLock) {
-            interceptRecords.toList().asReversed().take(limit).forEach { items.put(it) }
-        }
-        return toolResult(
-            baseEnvelope("list_requests", true, "ok")
-                .put("intercept_enabled", interceptEnabled)
-                .put("count", items.length())
-                .put("requests", items)
-        )
-    }
-
-    private fun clearInterceptRecords(): BrowserToolResult {
-        synchronized(interceptLock) { interceptRecords.clear() }
-        return toolResult(baseEnvelope("clear_requests", true, "ok"))
-    }
-
-    private val SUPPORTED_ACTIONS = setOf(
-        "navigate",
-        "get_readable",
-        "get_text",
-        "find_elements",
-        "click",
-        "type",
-        "scroll",
-        "screenshot",
-        "get_page_info",
-        "go_back",
-        "go_forward",
-        "reload",
-        "wait_for_selector",
-        "run_js",
-        "list_scripts",
-        "add_script",
-        "toggle_script",
-        "remove_script",
-        "debug_scripts",
-        "set_intercept",
-        "add_intercept_replace",
-        "clear_intercept_replace",
-        "list_requests",
-        "clear_requests",
-    )
 
 }
