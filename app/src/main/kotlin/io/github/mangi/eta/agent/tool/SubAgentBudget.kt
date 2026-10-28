@@ -5,8 +5,12 @@ package io.github.mangi.eta.agent.tool
  *
  * 一轮 = 一次模型请求 + 它返回的那批工具调用执行完。
  *
- * 分档而不是给所有人同一个上限：给简单任务 24 轮是浪费（它早该结束了，
- * 多出来的轮次只会让它反复改同一处），给复杂任务 6 轮又会半路掐断。
+ * 分档而不是给所有人同一个上限：给简单任务 40 轮是浪费（它早该结束了，
+ * 多出来的轮次只会让它反复改同一处），给复杂任务 10 轮又会半路掐断。
+ *
+ * 档位值是实测调过的：10/20/40。原来的 6/12/24 在「一次要跑六项检查」这类
+ * 中等任务上会在 12 轮被砍断（子代理把轮次花在 read_file/grep 上，还没写结论）。
+ * 主代理若判断工作量，应显式传 `complexity`，不要靠 prompt 长度去猜。
  *
  * 复杂度有两个来源，优先级从高到低：
  * 1. 主代理在 `spawn_agents` 里显式声明的 `complexity`；
@@ -16,9 +20,9 @@ package io.github.mangi.eta.agent.tool
  * 但它可能偷懒一律填 complex，所以只把它当"覆盖项"，默认仍由启发式兜底。
  */
 internal enum class SubAgentComplexity(val wireValue: String, val rounds: Int) {
-    Simple("simple", 6),
-    Normal("normal", 12),
-    Complex("complex", 24),
+    Simple("simple", 10),
+    Normal("normal", 20),
+    Complex("complex", 40),
     ;
 
     companion object {

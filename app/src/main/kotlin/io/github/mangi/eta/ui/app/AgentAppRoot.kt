@@ -50,6 +50,7 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.SettingsScreen
+import io.github.mangi.eta.ui.screens.subagent.SubagentSettingsScreen
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.model.AgentHomeAction
 import io.github.mangi.eta.ui.model.AgentMemoryAction
@@ -799,6 +800,9 @@ fun AgentAppRoot(
                     onNavigate = { route -> pushRoute(route) },
                     onBack = ::popRoute,
                 )
+            }
+            entry<AppRoute.Subagent>(swipeDismiss = swipeDismiss) {
+                SubagentSettingsScreen(onBack = ::popRoute)
             }
             entry<AppRoute.SharedFolders>(swipeDismiss = swipeDismiss) {
                 SharedFoldersScreen(

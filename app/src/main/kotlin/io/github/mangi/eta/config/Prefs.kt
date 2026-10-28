@@ -38,6 +38,11 @@ internal object Prefs {
         const val AGENT_CUSTOM_MODEL = "agent_custom_model"
         const val AGENT_REQUIRE_PREFIX = "agent_require_prefix"
         const val AGENT_TERMINAL_TOOLS = "agent_terminal_tools"
+        const val AGENT_SUBAGENT_TOOLS = "agent_subagent_tools"
+        /** 空 = 跟随主模型；否则为 ProviderRepository 里的模型 id。 */
+        const val AGENT_SUBAGENT_MODEL = "agent_subagent_model"
+        /** 空 = 跟随模型默认；否则 minimal / low / medium / high。 */
+        const val AGENT_SUBAGENT_REASONING = "agent_subagent_reasoning"
         const val AGENT_BROWSER_TOOLS = "agent_browser_tools"
         const val AGENT_DEVICE_DIRECT_TOOLS = "agent_device_direct_tools"
         const val AGENT_DEVICE_SENSITIVE_READ_TOOLS = "agent_device_sensitive_read_tools"
@@ -65,6 +70,7 @@ internal object Prefs {
             AGENT_CUSTOM_MODEL to true,
             AGENT_REQUIRE_PREFIX to false,
             AGENT_TERMINAL_TOOLS to true,
+            AGENT_SUBAGENT_TOOLS to true,
             AGENT_BROWSER_TOOLS to true,
             AGENT_DEVICE_DIRECT_TOOLS to true,
             AGENT_DEVICE_SENSITIVE_READ_TOOLS to true,
@@ -78,6 +84,7 @@ internal object Prefs {
         /** 由 Eta Runtime 最终裁决、不要求 Xposed 框架在线的开关。 */
         val LOCAL_AGENT_KEYS: Set<String> = setOf(
             AGENT_TERMINAL_TOOLS,
+            AGENT_SUBAGENT_TOOLS,
             AGENT_BROWSER_TOOLS,
             AGENT_DEVICE_DIRECT_TOOLS,
             AGENT_DEVICE_SENSITIVE_READ_TOOLS,
@@ -130,6 +137,18 @@ internal object Prefs {
         return preferences?.getBoolean(key, default) ?: default
     }
 
+    /** 本地 Agent 配置里的字符串（子代理模型/思考强度这类不走远端同步的项）。 */
+    fun getLocalString(key: String): String =
+        (localAgent ?: remote)?.getString(key, "").orEmpty()
+
+    fun putLocalBoolean(key: String, value: Boolean) {
+        (localAgent ?: remote)?.edit()?.putBoolean(key, value)?.apply()
+    }
+
+    fun putLocalString(key: String, value: String) {
+        (localAgent ?: remote)?.edit()?.putString(key, value)?.apply()
+    }
+
     fun getString(key: String): String {
         return remote?.getString(key, "") ?: ""
     }
@@ -172,7 +191,9 @@ internal object Prefs {
         var updateRemote = false
 
         Keys.LOCAL_AGENT_KEYS.forEach { key ->
-            val default = Keys.BOOLEAN_DEFAULTS.getValue(key)
+            // LOCAL_AGENT_KEYS 是布尔开关集合；字符串型键（如子代理模型/思考强度）不参与迁移。
+            // 用 getOrNull 而不是 getValue：以后有人往集合里塞非布尔键时只跳过，不能让设置页崩。
+            val default = Keys.BOOLEAN_DEFAULTS[key] ?: return@forEach
             when {
                 local.contains(key) -> {
                     remoteEditor.putBoolean(key, local.getBoolean(key, default))

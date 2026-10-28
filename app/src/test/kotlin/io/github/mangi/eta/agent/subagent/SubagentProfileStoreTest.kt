@@ -137,6 +137,38 @@ class AgentSubagentToolsetTest {
     }
 
     @Test
+    fun declaredComplexityReachesTheRequest() {
+        val toolset = toolset()
+        toolset.execute(
+            call(
+                "subagent",
+                """{"prompt":"跑六项检查","description":"巡检","complexity":"complex"}""",
+            ),
+        )
+        assertEquals(io.github.mangi.eta.agent.tool.SubAgentComplexity.Complex, seen.single().declaredComplexity)
+    }
+
+    @Test
+    fun unknownComplexityFallsBackToEstimation() {
+        val toolset = toolset()
+        toolset.execute(
+            call("subagent", """{"prompt":"看一下","description":"探查","complexity":"medium"}"""),
+        )
+        // 模型偶尔写成 medium/low，不该因此整个派发失败，退回按 prompt 长度估算。
+        assertNull(seen.single().declaredComplexity)
+    }
+
+    @Test
+    fun schemaAdvertisesTheComplexityEnum() {
+        val array = JSONArray()
+        AgentSubagentToolset.appendSchemas(array)
+        val properties = array.getJSONObject(0).getJSONObject("function")
+            .getJSONObject("parameters").getJSONObject("properties")
+        val values = properties.getJSONObject("complexity").getJSONArray("enum")
+        assertEquals(listOf("simple", "normal", "complex"), (0 until values.length()).map { values.getString(it) })
+    }
+
+    @Test
     fun resumeKeepsPriorTranscript() {
         val store = SubagentProfileStore(temp.root)
         val toolset = toolset(store)

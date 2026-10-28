@@ -492,6 +492,19 @@ private fun SettingsPageContent(
 
                     EtaPreferenceDivider()
                     EtaArrowPreference(
+                        title = stringResource(R.string.subagent_page_title),
+                        summary = stringResource(R.string.ui_enable_subagent_5c1f8e),
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.AccountTree,
+                                tint = EtaPreferenceColors.Blue,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.Subagent) },
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
                         title = stringResource(R.string.ui_linux_tool_environment_314d22),
                         startAction = {
                             EtaPreferenceIcon(

@@ -11,7 +11,7 @@ class SubAgentBudgetTest {
             SubAgentComplexity.Simple,
             SubAgentBudget.estimate("读出 build.gradle 里的 compileSdk"),
         )
-        assertEquals(6, SubAgentBudget.roundsFor("读一下 a.txt", declared = null))
+        assertEquals(10, SubAgentBudget.roundsFor("读一下 a.txt", declared = null))
     }
 
     @Test
@@ -19,7 +19,7 @@ class SubAgentBudgetTest {
         val prompt = "检查 app/src/main 下所有 Kotlin 文件的 import 顺序是否一致，" +
             "把不一致的列出来但不要改。".repeat(12)
         assertEquals(SubAgentComplexity.Normal, SubAgentBudget.estimate(prompt))
-        assertEquals(12, SubAgentBudget.roundsFor(prompt, declared = null))
+        assertEquals(20, SubAgentBudget.roundsFor(prompt, declared = null))
     }
 
     @Test
@@ -34,18 +34,18 @@ class SubAgentBudgetTest {
             SubAgentComplexity.Complex,
             SubAgentBudget.estimate("逐一对比三个模块，并分别验证它们的入口"),
         )
-        assertEquals(24, SubAgentBudget.roundsFor("逐一对比并分别验证", declared = null))
+        assertEquals(40, SubAgentBudget.roundsFor("逐一对比并分别验证", declared = null))
     }
 
     @Test
     fun explicitDeclarationAlwaysWins() {
         // 模型自己知道细节，声明优先于启发式——但只作为覆盖项，默认仍由估算兜底。
         assertEquals(
-            6,
+            10,
             SubAgentBudget.roundsFor("很长很长的任务说明".repeat(200), SubAgentComplexity.Simple),
         )
         assertEquals(
-            24,
+            40,
             SubAgentBudget.roundsFor("一句话", SubAgentComplexity.Complex),
         )
     }

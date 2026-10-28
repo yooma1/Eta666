@@ -75,8 +75,6 @@ internal object SettingsDataStore {
     /** Separate opt-in: automatic task experience capture retains tool names and error codes. */
     private val AUTO_EXPERIENCE_ENABLED = booleanPreferencesKey("auto_experience_enabled")
     private val SMART_RETAIN_ENABLED = booleanPreferencesKey("smart_retain_enabled")
-    /** 子代理开关；默认开启，关掉后主代理不再拿到 subagent / subagent_profile 工具。 */
-    private val SUBAGENT_ENABLED = booleanPreferencesKey("agent_subagent_enabled")
     private val SEMANTIC_MEMORY_ENABLED = booleanPreferencesKey("semantic_memory_enabled")
     private val SEMANTIC_MEMORY_MODEL = stringPreferencesKey("semantic_memory_model")
     private val SEMANTIC_MEMORY_USE_EMBEDDINGS = booleanPreferencesKey("semantic_memory_use_embeddings")
@@ -204,18 +202,6 @@ internal object SettingsDataStore {
     suspend fun setSmartRetainEnabled(enabled: Boolean) {
         ensureInitialized()
         dataStore.edit { it[SMART_RETAIN_ENABLED] = enabled }
-    }
-
-    suspend fun subagentEnabled(): Boolean {
-        ensureInitialized()
-        return dataStore.data
-            .catch { cause -> if (cause is IOException) emit(emptyPreferences()) else throw cause }
-            .map { it[SUBAGENT_ENABLED] ?: true }.first()
-    }
-
-    suspend fun setSubagentEnabled(enabled: Boolean) {
-        ensureInitialized()
-        dataStore.edit { it[SUBAGENT_ENABLED] = enabled }
     }
 
     suspend fun semanticMemoryEnabled(): Boolean {

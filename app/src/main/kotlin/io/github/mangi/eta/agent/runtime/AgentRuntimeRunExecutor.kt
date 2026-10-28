@@ -79,6 +79,8 @@ import io.github.mangi.eta.data.repository.AgentUserPromptSnapshot
 import io.github.mangi.eta.data.repository.ModelRepository
 import io.github.mangi.eta.data.repository.ProviderRepository
 import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -475,10 +477,9 @@ internal class AgentRuntimeRunExecutor(
             var subAgentTool: AgentSubAgentTool? = null
             var subAgentExecutor: AgentModelClient.ToolExecutor? = null
             var subagentToolset: AgentSubagentToolset? = null
-            // 子代理默认开启：设置项只作为关闭开关，避免用户装完还要去别处找入口。
-            val subagentEnabled = runCatching {
-                runBlocking { SettingsDataStore.subagentEnabled() }
-            }.getOrDefault(true)
+            // 开关走 Prefs（与「终端/文件工具」等同组），设置页「启用 Subagent」直接对应这里；
+            // 默认 true，关掉后主代理拿不到 subagent / subagent_profile 两个工具。
+            val subagentEnabled = Prefs.isEnabled(Prefs.Keys.AGENT_SUBAGENT_TOOLS)
             val subagentStore = SubagentProfileStore(appContext.filesDir)
             val runTools = JSONArray(mcpTools.toString()).also { tools ->
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
@@ -638,7 +639,7 @@ internal class AgentRuntimeRunExecutor(
                         start()
                     }
                     try {
-                        val rounds = SubAgentBudget.roundsFor(subagentRequest.prompt, null)
+                        val rounds = SubAgentBudget.roundsFor(subagentRequest.prompt, subagentRequest.declaredComplexity)
                         val childPrompt = buildString {
                             appendLine("你是主代理派出的 Subagent（类型：${profile.name}）。")
                             appendLine("你看不到主对话，只依据下面的角色设定与任务说明工作。")
@@ -656,8 +657,32 @@ internal class AgentRuntimeRunExecutor(
                                     "不能操作屏幕，不能再派子代理，不能反问；缺什么就用可用工具自己查清楚。",
                             )
                         }
+                        // 子代理可单独指定轻量模型与思考强度；未指定或模型已停用时跟随主模型。
+                        val subagentModelId = Prefs.getLocalString(Prefs.Keys.AGENT_SUBAGENT_MODEL)
+                        val baseSubagentConfig = request.config
+                        val resolvedSubagentConfig = if (subagentModelId.isBlank()) {
+                            baseSubagentConfig
+                        } else {
+                            runCatching {
+                                // 子代理运行在非 suspend 的工具回调里，这里用 runBlocking 取一次配置。
+                                runBlocking { RuntimeConfigRepository.runtimeConfigFor(subagentModelId) }
+                            }.getOrNull()
+                                ?.copy(systemPrompt = baseSubagentConfig.systemPrompt)
+                                ?: baseSubagentConfig
+                        }
+                        val reasoningOverride = ReasoningEffort.fromWireValue(
+                            Prefs.getLocalString(Prefs.Keys.AGENT_SUBAGENT_REASONING),
+                        )
+                        val subagentChildConfig = if (reasoningOverride == null) {
+                            resolvedSubagentConfig
+                        } else {
+                            resolvedSubagentConfig.copy(
+                                reasoningEffort = reasoningOverride,
+                                thinkingEnabled = reasoningOverride.enablesReasoning,
+                            )
+                        }
                         val response = AgentModelClient.complete(
-                            config = request.config,
+                            config = subagentChildConfig,
                             maxRounds = rounds,
                             prompt = childPrompt,
                             toolExecutor = childExecutor,

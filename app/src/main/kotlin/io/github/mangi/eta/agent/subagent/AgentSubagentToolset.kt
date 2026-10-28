@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.subagent
 
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.tool.SubAgentComplexity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -14,6 +15,8 @@ internal data class SubagentRunRequest(
     val resumed: Boolean,
     val history: List<AgentModelClient.ConversationMessage>,
     val type: String,
+    /** 主代理显式声明的工作量；null 时由 [io.github.mangi.eta.agent.tool.SubAgentBudget] 按 prompt 估算。 */
+    val declaredComplexity: SubAgentComplexity? = null,
 )
 
 /**
@@ -43,6 +46,8 @@ internal class AgentSubagentToolset(
         val resumeId = args.optString("resume").trim()
         val role = args.optString("role").trim()
         val requestedTools = stringList(args.optJSONArray("tools"))
+        // 非法值不报错，退回估算——模型偶尔会把档位写成 "medium"，不该因此整个派发失败。
+        val declaredComplexity = SubAgentComplexity.fromWire(args.optString("complexity"))
 
         val resolved = if (resumeId.isNotEmpty()) {
             val session = SubagentSessionRegistry.find(resumeId)
@@ -99,6 +104,7 @@ internal class AgentSubagentToolset(
                 resumed = resolved.resumed,
                 history = resolved.history,
                 type = resolved.type,
+                declaredComplexity = declaredComplexity,
             ),
         )
         val payload = runCatching { JSONObject(result.content) }.getOrNull()
@@ -284,6 +290,16 @@ internal class AgentSubagentToolset(
                             "Preset type (\"explore\", \"coder\", \"plan\", or a saved custom profile) OR any ad-hoc kebab-case " +
                                 "role name (e.g. \"bill-analyzer\", \"apk-inspector\") to spawn an ephemeral specialized subagent on the fly. " +
                                 "Defaults to \"explore\" when omitted. Do not set when `resume` is provided.",
+                        ),
+                )
+                .put(
+                    "complexity",
+                    JSONObject().put("type", "string")
+                        .put("enum", JSONArray().put("simple").put("normal").put("complex"))
+                        .put(
+                            "description",
+                            "Estimated workload, decides the subagent's round budget (simple=10, normal=20, complex=40 rounds). " +
+                                "Set it yourself when you know how much work this is; omit to let the runtime estimate from the prompt length.",
                         ),
                 )
                 .put(
