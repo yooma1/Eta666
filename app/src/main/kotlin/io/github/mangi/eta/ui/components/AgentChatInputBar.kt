@@ -600,7 +600,7 @@ private fun PendingImageStrip(
                     .size(60.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(MiuixTheme.colorScheme.surfaceContainer)
-                    .clickable(interactionSource = null, indication = null) { viewedImage = image.dataUrl },
+                    .clickable(interactionSource = null, indication = null) { viewedImage = image.displayUrl },
             ) {
                 rememberDataUrlBitmap(image.dataUrl)?.let { bitmap ->
                     Image(

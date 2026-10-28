@@ -116,17 +116,38 @@ import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-@Composable
-internal fun rememberDataUrlBitmap(dataUrl: String) = remember(dataUrl) {
-    decodeDataUrlBitmap(dataUrl)
-}
+/** 缩略图上限：100dp 在 3x 屏上是 300px，40 万像素够用，再大纯属浪费内存。 */
+internal const val THUMBNAIL_MAX_PIXELS = 400_000L
 
-internal fun decodeDataUrlBitmap(dataUrl: String): ImageBitmap? {
+/**
+ * @param maxPixels 大于 0 时按 2 的幂降采样到不超过这个像素数；看图器传 0 取全分辨率。
+ *
+ * 为什么要这个参数：历史消息里存的是 1600 长边的展示档，直接按原尺寸解成 100dp 缩略图，
+ * 每张要占 7.7MB ARGB，一屏十几张就够 OOM 了。
+ */
+@Composable
+internal fun rememberDataUrlBitmap(dataUrl: String, maxPixels: Long = 0L) =
+    remember(dataUrl, maxPixels) { decodeDataUrlBitmap(dataUrl, maxPixels) }
+
+internal fun decodeDataUrlBitmap(dataUrl: String, maxPixels: Long = 0L): ImageBitmap? {
     val base64 = dataUrl.substringAfter("base64,", "")
     if (base64.isBlank()) return null
     return runCatching {
         val bytes = Base64.decode(base64, Base64.NO_WRAP)
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        val options = BitmapFactory.Options()
+        if (maxPixels > 0) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (
+                bounds.outWidth > 0 && bounds.outHeight > 0 &&
+                bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > maxPixels
+            ) {
+                sample *= 2
+            }
+            options.inSampleSize = sample
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
     }.getOrNull()
 }
 
@@ -1173,7 +1194,7 @@ private fun MessageImageRow(images: List<String>) {
         modifier = Modifier.padding(bottom = 8.dp),
     ) {
         images.forEach { dataUrl ->
-            val bitmap = rememberDataUrlBitmap(dataUrl)
+            val bitmap = rememberDataUrlBitmap(dataUrl, THUMBNAIL_MAX_PIXELS)
             if (bitmap != null) {
                 Image(
                     bitmap = bitmap,

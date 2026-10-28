@@ -57,6 +57,19 @@ internal object AgentModelImageEncoder {
         mimeType = "image/jpeg",
         quality = PREVIEW_JPEG_QUALITY,
     )
+
+    /**
+     * 界面展示用的中等档：缩略图点开要看得清，但也不能拿原图去铺——原图 4000×3000 解出来
+     * 是 48MB 的 ARGB 位图，多开几张就 OOM。1600 长边在 1080p 屏上已经超过 1:1，
+     * 放大到 1.6 倍仍清晰；JPEG 88 通常 150–350KB，base64 后写进会话 JSON 也不会失控。
+     */
+    private val displayProfile = EncodingProfile(
+        maxLongEdge = 1600,
+        maxPixels = 2_000_000L,
+        format = Bitmap.CompressFormat.JPEG,
+        mimeType = "image/jpeg",
+        quality = 88,
+    )
     private val toolVisionProfile = EncodingProfile(
         format = Bitmap.CompressFormat.JPEG,
         mimeType = "image/jpeg",
@@ -105,10 +118,22 @@ internal object AgentModelImageEncoder {
     fun preview(
         context: Context,
         image: AgentModelClient.ModelImage,
+    ): AgentModelClient.ModelImage? = rescale(context, image, previewProfile)
+
+    /** 看图器用的展示档：比缩略图清晰得多，又比原图省内存。 */
+    fun display(
+        context: Context,
+        image: AgentModelClient.ModelImage,
+    ): AgentModelClient.ModelImage? = rescale(context, image, displayProfile)
+
+    private fun rescale(
+        context: Context,
+        image: AgentModelClient.ModelImage,
+        profile: EncodingProfile,
     ): AgentModelClient.ModelImage? = runCatching {
         val width = image.width ?: return@runCatching null
         val height = image.height ?: return@runCatching null
-        val target = targetSize(width, height, previewProfile)
+        val target = targetSize(width, height, profile)
         val openStream = referenceStreamFactory(context, image.reference) ?: return@runCatching null
         val options = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -118,7 +143,7 @@ internal object AgentModelImageEncoder {
             BitmapFactory.decodeStream(input, null, options)
         } ?: return@runCatching null
         try {
-            encodeBitmap(decoded, image.source, previewProfile, flattenAlpha = true)
+            encodeBitmap(decoded, image.source, profile, flattenAlpha = true)
         } finally {
             if (!decoded.isRecycled) decoded.recycle()
         }

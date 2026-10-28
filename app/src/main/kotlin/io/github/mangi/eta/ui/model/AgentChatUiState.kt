@@ -209,7 +209,15 @@ data class SuggestionChipsMessageUi(
 data class PendingImageUi(
     val id: String,
     val uri: String,
+    /** 发给模型的预览（512 长边），也是缩略图数据源。 */
     val dataUrl: String,
+    /**
+     * 看图器与历史消息用的展示副本（1600 长边 / q88）。
+     *
+     * 为什么不直接拿 [uri]（原图）：4000×3000 原图解出来是 48MB ARGB 位图，多开几张就 OOM；
+     * 也不能复用 [dataUrl]：512 长边铺到全屏就是糊的，那正是「点开大图还是模糊」的原因。
+     */
+    val displayUrl: String,
     val mimeType: String,
 )
 
