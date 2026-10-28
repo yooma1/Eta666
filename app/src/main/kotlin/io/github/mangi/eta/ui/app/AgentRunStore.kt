@@ -35,6 +35,31 @@ internal class AgentRunStore(
 
     fun conversationId(runId: String): String? = entries[runId]?.conversationId
 
+    /**
+     * 该会话是否真有一个还活着的观察任务。
+     *
+     * 和 activeRunId 的区别：activeRunId 只看登记表里有没有这一项，而结算卡住（例如持久化 await 不返回）
+     * 时那一项会一直留在表里、job 已经结束或根本没启动。UI 要的是「真的还在跑」，不是「表里还有行」。
+     */
+    fun hasLiveRun(conversationId: String?): Boolean = conversationId != null && entries.values.any {
+        it.observed && it.conversationId == conversationId && it.job?.isActive == true
+    }
+
+    /**
+     * 丢掉本会话里已经不可能再产出事件的观察项，返回被丢掉的 runId。
+     *
+     * 只在用户明确要求重新开始时调用：这些项对应的 job 已经结束，继续留着只会让新的 register 失败，
+     * 表现就是按钮点了完全没反应。
+     */
+    fun dropDeadRuns(conversationId: String?): List<String> {
+        if (conversationId == null) return emptyList()
+        val dead = entries.filterValues {
+            it.observed && it.conversationId == conversationId && it.job?.isActive != true
+        }.keys.toList()
+        dead.forEach { runId -> entries.remove(runId)?.flushJob?.cancel() }
+        return dead
+    }
+
     fun register(runId: String, conversationId: String, observed: Boolean = true): Boolean {
         if (runId in entries || observed && activeRunId(conversationId) != null) return false
         entries[runId] = Entry(conversationId, observed)

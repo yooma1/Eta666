@@ -1486,7 +1486,12 @@ internal class AgentAppState(
     }
 
     fun regenerateMessage(messageId: String) {
-        if (homeState.isStreaming || homeState.messageEdit != null) return
+        if (homeState.isStreaming || homeState.messageEdit != null) {
+            AndroidAgentLogger.warn(
+                "agent_regenerate_blocked: streaming=${homeState.isStreaming} editing=${homeState.messageEdit != null}"
+            )
+            return
+        }
         val conversationId = selectedConversationId ?: return
         if (homeState.roleplay != null) {
             val target = homeState.messages.filterIsInstance<AgentMessageUi>().firstOrNull { it.id == messageId } ?: return
@@ -1541,19 +1546,56 @@ internal class AgentAppState(
      *
      * 为什么需要：失败/中断的结果回来时，setConversationStreaming 依赖 conversationIdForRun 能找到会话；
      * 一旦 run 映射先被清掉就会提前 return，isStreaming 永久停在 true。表现就是失败提示下方按钮点了没反应
-     * （regenerateMessage 第一行直接 return）。这里在重试/继续入口先兜一次底。
+     * （regenerateMessage 第一行直接 return）。
+     *
+     * 注意这里不再用 activeRunId 当门闩：结算卡住时登记表里那条记录会一直在，但它对应的 job 早已结束，
+     * 用它判断会让清理刚好在最需要的时候跳过——这正是上一版点了依旧没反应的原因。
      */
     private fun clearStaleRunFlags() {
         val conversationId = selectedConversationId ?: return
+        val dropped = runStore.dropDeadRuns(conversationId)
+        val staleActive = runStore.activeRunId(conversationId)
+        if (dropped.isNotEmpty() || staleActive != null) {
+            AndroidAgentLogger.warn(
+                "agent_retry_clear_stale: conv=${conversationId.take(8)} dropped=${dropped.size} " +
+                    "staleActive=${staleActive?.take(12)} live=${runStore.hasLiveRun(conversationId)}"
+            )
+        }
+        // 只有本会话确实没有活着的任务时才敢清；真在跑的时候清掉登记项会让那条回复的收尾全部丢失。
+        if (runStore.hasLiveRun(conversationId)) return
+        staleActive?.let { runStore.remove(it) }
         val state = conversationsById[conversationId] ?: return
         if (!state.isStreaming && !state.isCompacting) return
-        // 按本会话判断：别的会话在跑不该拦住这里的清理。
-        if (runStore.activeRunId(conversationId) != null) return
         updateConversation(conversationId, state.copy(isStreaming = false, isCompacting = false))
     }
 
     fun retryFailedRun(noticeMessageId: String) {
+        val conversationId = selectedConversationId
+        AndroidAgentLogger.warn(
+            "agent_retry_clicked: conv=${conversationId?.take(8)} streaming=${homeState.isStreaming} " +
+                "compacting=${homeState.isCompacting} editing=${homeState.messageEdit != null} " +
+                "activeRun=${runStore.activeRunId(conversationId)?.take(12)} messages=${homeState.messages.size} " +
+                "hasNotice=${homeState.messages.any { it.id == noticeMessageId }}"
+        )
         clearStaleRunFlags()
+        if (runStore.hasLiveRun(conversationId)) {
+            // 真的还在跑：提示出现只是上一轮的残留，直接重试会和正在跑的这轮打架，先说清楚。
+            AndroidAgentLogger.warn("agent_retry_blocked: conversation_still_running")
+            Toast.makeText(appContext, R.string.run_blocked_already_running, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val boundary = conversationId?.let {
+            AgentConversationRevisionReducer.boundary(homeState, noticeMessageId)
+        }
+        AndroidAgentLogger.warn(
+            "agent_retry_boundary: found=${boundary != null} userIndex=${boundary?.userMessageIndex} " +
+                "streaming=${homeState.isStreaming} hasEarlier=${homeState.hasEarlierMessages}"
+        )
+        if (boundary == null) {
+            // 找不到所属用户轮：说清楚原因，别让点击看起来像没生效。
+            Toast.makeText(appContext, R.string.conversation_load_turn_start, Toast.LENGTH_SHORT).show()
+            return
+        }
         regenerateMessage(noticeMessageId)
     }
 
@@ -1564,8 +1606,19 @@ internal class AgentAppState(
      * 否则会把用户正在准备的内容误当成这一轮的输入。
      */
     fun continueRunAfterFailure(text: String = appContext.getString(R.string.run_action_continue)) {
+        AndroidAgentLogger.warn(
+            "agent_continue_clicked: conv=${selectedConversationId?.take(8)} streaming=${homeState.isStreaming} " +
+                "compacting=${homeState.isCompacting} loaded=${homeState.isConversationLoaded} " +
+                "activeRun=${runStore.activeRunId(selectedConversationId)?.take(12)}"
+        )
         clearStaleRunFlags()
-        if (!homeState.isConversationLoaded || homeState.isStreaming || homeState.isCompacting) return
+        if (!homeState.isConversationLoaded || homeState.isStreaming || homeState.isCompacting) {
+            AndroidAgentLogger.warn(
+                "agent_continue_blocked: loaded=${homeState.isConversationLoaded} " +
+                    "streaming=${homeState.isStreaming} compacting=${homeState.isCompacting}"
+            )
+            return
+        }
         val conversationId = selectedConversationId
         if (conversationId == null || conversationId in pendingConversationDeletes) return
         dispatchMessageToConversation(
@@ -1604,7 +1657,20 @@ internal class AgentAppState(
         operation: String = AgentRuntimeWire.OP_CHAT,
         rewriteTargetMessageId: String? = null,
     ) {
-        if (conversationId in pendingConversationDeletes || !runStore.register(runId, conversationId)) return
+        if (conversationId in pendingConversationDeletes) {
+            AndroidAgentLogger.warn("agent_run_launch_blocked: conversation_pending_delete")
+            return
+        }
+        if (!runStore.register(runId, conversationId)) {
+            // 静默 return 会让「点了没反应」无从排查：登记失败只可能是本会话还有一个活的 run。
+            AndroidAgentLogger.warn(
+                "agent_run_launch_blocked: register_failed conv=${conversationId.take(8)} " +
+                    "activeRun=${runStore.activeRunId(conversationId)?.take(12)} " +
+                    "live=${runStore.hasLiveRun(conversationId)}"
+            )
+            Toast.makeText(appContext, R.string.run_blocked_already_running, Toast.LENGTH_SHORT).show()
+            return
+        }
         // 发送即绑定：会话记住本轮实际使用的模型，回落到默认模型时也随之更新。
         val runModelId = state.effectiveModelId
         val runReasoningEffort = providers.enabledModel(runModelId)?.let { (provider, model) ->
@@ -2057,6 +2123,7 @@ internal class AgentAppState(
         flushPendingRunDelta(runId)
         val completedConversationId = conversationIdForRun(runId) ?: return
         if (!runStore.beginSettlement(runId)) return
+        scheduleSettlementWatchdog(runId, completedConversationId)
         val explicitlyStoppedByUser = runStore.wasStoppedByUser(runId)
         val rewriting = result.operation == AgentRuntimeWire.OP_REWRITE_REPLY || isReplyRewrite(runId)
         if (rewriting) {
@@ -2160,6 +2227,31 @@ internal class AgentAppState(
                     dispatchQueuedMessage(conversationId, nextQueued)
                 }
             }
+        }
+    }
+
+    /**
+     * 结算看门狗。
+     *
+     * 结果已经落进消息列表之后，收尾还要等 persistConversations().await()；一旦这次持久化卡住
+     * （排队在前面那笔没结束、磁盘慢），setConversationStreaming(false) 和 runStore.remove 就永远不执行。
+     * 后果是输入框一直转圈、失败提示下的「重试/继续」被后续守卫拦住，观感就是点了没反应。
+     * 这里到点兜一次底：只要登记项还在，就当成已收尾处理。
+     */
+    private fun scheduleSettlementWatchdog(runId: String, conversationId: String) {
+        scope.launch(Dispatchers.Main.immediate) {
+            delay(SETTLEMENT_WATCHDOG_MS)
+            if (runStore.conversationId(runId) == null) return@launch
+            AndroidAgentLogger.warn(
+                "agent_settlement_watchdog: run=${runId.take(12)} conv=${conversationId.take(8)}"
+            )
+            conversationsById[conversationId]?.let { state ->
+                if (state.isStreaming || state.isCompacting) {
+                    updateConversation(conversationId, state.copy(isStreaming = false, isCompacting = false))
+                }
+            }
+            runStore.remove(runId)
+            refreshConversationSummaries()
         }
     }
 
@@ -2397,6 +2489,7 @@ internal class AgentAppState(
     private companion object {
         const val MAX_TITLE_CHARS = 24
         const val MAX_PREVIEW_CHARS = 48
+        const val SETTLEMENT_WATCHDOG_MS = 12_000L
         const val LEGACY_STOPPED_ERROR = "已停止"
         const val SYNTHETIC_STATUS_STOPPED = "eta_status:stopped"
 

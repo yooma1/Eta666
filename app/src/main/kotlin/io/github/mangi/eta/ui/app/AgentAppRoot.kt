@@ -428,8 +428,16 @@ fun AgentAppRoot(
                                     }
                                 }
                                 is AgentHomeAction.SelectReplyCandidate -> agentState.selectReplyCandidate(action.id, action.index)
-                                is AgentHomeAction.RetryFailedRun -> { requestExecutionNotifications(); agentState.retryFailedRun(action.id) }
-                                AgentHomeAction.ContinueRun -> { requestExecutionNotifications(); agentState.continueRunAfterFailure() }
+                                is AgentHomeAction.RetryFailedRun -> {
+                                    AndroidAgentLogger.warn("agent_action_retry_failed_run: id=${action.id.take(24)}")
+                                    requestExecutionNotifications()
+                                    agentState.retryFailedRun(action.id)
+                                }
+                                AgentHomeAction.ContinueRun -> {
+                                    AndroidAgentLogger.warn("agent_action_continue_run")
+                                    requestExecutionNotifications()
+                                    agentState.continueRunAfterFailure()
+                                }
                                 AgentHomeAction.OpenTools -> pushRoute(AppRoute.Tools)
                                 AgentHomeAction.OpenSkills -> pushRoute(AppRoute.Skills)
                                 AgentHomeAction.OpenPermissions -> pushRoute(AppRoute.Permissions)
