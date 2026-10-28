@@ -294,8 +294,11 @@ internal fun ChatMessageItem(
                     onRegenerate = { onRegenerateMessage(message.id) },
                 )
                 if (message.code in RunFailureNoticeCodes) {
+                    // 刻意不受 messageActionsEnabled 约束：那个值是「正在生成/正在编辑」时禁用工具条，
+                    // 而失败提示出现本身就意味着这一轮已经结束。之前绑上去导致 isStreaming 残留为 true 时
+                    // 按钮看得见、点下去却被静默吞掉，观感就是「点了没反应」。
                     RunFailureActionsRow(
-                        enabled = messageActionsEnabled,
+                        enabled = true,
                         onRetry = { onRetryRun(message.id) },
                         onContinue = onContinueRun,
                     )

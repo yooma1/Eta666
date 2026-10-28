@@ -1536,7 +1536,24 @@ internal class AgentAppState(
      * 复用“重新生成”的边界推导：失败提示本身没有正文，但它前面一定挂着本轮的用户消息，
      * 因此回滚到该轮起点重发即可，既不新增用户消息，也不会把后面几轮一起冲掉。
      */
+    /**
+     * 清掉当前会话残留的「运行中」标记。
+     *
+     * 为什么需要：失败/中断的结果回来时，setConversationStreaming 依赖 conversationIdForRun 能找到会话；
+     * 一旦 run 映射先被清掉就会提前 return，isStreaming 永久停在 true。表现就是失败提示下方按钮点了没反应
+     * （regenerateMessage 第一行直接 return）。这里在重试/继续入口先兜一次底。
+     */
+    private fun clearStaleRunFlags() {
+        val conversationId = selectedConversationId ?: return
+        val state = conversationsById[conversationId] ?: return
+        if (!state.isStreaming && !state.isCompacting) return
+        // 按本会话判断：别的会话在跑不该拦住这里的清理。
+        if (runStore.activeRunId(conversationId) != null) return
+        updateConversation(conversationId, state.copy(isStreaming = false, isCompacting = false))
+    }
+
     fun retryFailedRun(noticeMessageId: String) {
+        clearStaleRunFlags()
         regenerateMessage(noticeMessageId)
     }
 
@@ -1547,6 +1564,7 @@ internal class AgentAppState(
      * 否则会把用户正在准备的内容误当成这一轮的输入。
      */
     fun continueRunAfterFailure(text: String = appContext.getString(R.string.run_action_continue)) {
+        clearStaleRunFlags()
         if (!homeState.isConversationLoaded || homeState.isStreaming || homeState.isCompacting) return
         val conversationId = selectedConversationId
         if (conversationId == null || conversationId in pendingConversationDeletes) return
