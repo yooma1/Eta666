@@ -50,6 +50,12 @@ import io.github.mangi.eta.agent.skill.SkillTriggerSignals
 import io.github.mangi.eta.agent.skill.SkillUsageStats
 import io.github.mangi.eta.agent.tool.AgentLocalTools
 import io.github.mangi.eta.agent.tool.AgentSubAgentTool
+import io.github.mangi.eta.agent.tool.SubAgentBudget
+import io.github.mangi.eta.agent.subagent.AgentSubagentToolset
+import io.github.mangi.eta.agent.subagent.SubagentCatalog
+import io.github.mangi.eta.agent.subagent.SubagentProfile
+import io.github.mangi.eta.agent.subagent.SubagentProfileStore
+import io.github.mangi.eta.agent.subagent.SubagentSessionRegistry
 import io.github.mangi.eta.agent.tool.AgentTaskTool
 import io.github.mangi.eta.agent.tool.ScreenBusyException
 import io.github.mangi.eta.agent.tool.ScreenLease
@@ -468,6 +474,12 @@ internal class AgentRuntimeRunExecutor(
             }
             var subAgentTool: AgentSubAgentTool? = null
             var subAgentExecutor: AgentModelClient.ToolExecutor? = null
+            var subagentToolset: AgentSubagentToolset? = null
+            // 子代理默认开启：设置项只作为关闭开关，避免用户装完还要去别处找入口。
+            val subagentEnabled = runCatching {
+                runBlocking { SettingsDataStore.subagentEnabled() }
+            }.getOrDefault(true)
+            val subagentStore = SubagentProfileStore(appContext.filesDir)
             val runTools = JSONArray(mcpTools.toString()).also { tools ->
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
                 if (characterMemoryTools != null && memoryEnabled) CharacterMemoryTools.appendSchemas(tools)
@@ -475,6 +487,7 @@ internal class AgentRuntimeRunExecutor(
                     tools.put(taskTool.schema())
                     tools.put(AgentSubAgentTool.schema())
                 }
+                if (subagentEnabled) AgentSubagentToolset.appendSchemas(tools)
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
                 if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
@@ -485,6 +498,13 @@ internal class AgentRuntimeRunExecutor(
                     taskTool.execute(call)
                 } else if (call.name == AgentSubAgentTool.SPAWN_AGENTS) {
                     subAgentTool?.execute(call) ?: errorToolResult(
+                        "SUBAGENT_UNAVAILABLE", "当前会话不支持子代理",
+                    )
+                } else if (
+                    call.name == SubagentCatalog.SUBAGENT_TOOL ||
+                    call.name == SubagentCatalog.PROFILE_TOOL
+                ) {
+                    subagentToolset?.execute(call) ?: errorToolResult(
                         "SUBAGENT_UNAVAILABLE", "当前会话不支持子代理",
                     )
                 } else {
@@ -518,19 +538,29 @@ internal class AgentRuntimeRunExecutor(
                     }
                 }
             }
-            // 子代理的执行器：拦掉屏幕、派发与清单写入，其余能力共享。
+            // 子代理的执行器：拦掉屏幕、派发、档案管理与清单写入，其余能力共享。
             // 共享工具实例是有意的——屏幕观察状态才需要隔离，而不碰屏幕的子代理不会污染它。
-            subAgentExecutor = AgentModelClient.ToolExecutor { call ->
-                when {
-                    call.name == AgentSubAgentTool.SPAWN_AGENTS ->
-                        errorToolResult("SUBAGENT_CANNOT_SPAWN", "子代理不能再派子代理；请自己完成这一步。")
-                    ScreenToolPolicy.isScreenTool(call.name) ->
-                        errorToolResult("SCREEN_TOOLS_UNAVAILABLE", "子代理不能操作屏幕；需要看屏幕的步骤留给主代理。")
-                    call.name == AgentTaskTool.TASK_WRITE ->
-                        errorToolResult("SUBAGENT_CANNOT_WRITE_TASKS", "子代理不能修改主代理的任务清单。")
-                    else -> runToolExecutor.execute(call)
+            fun childExecutorFor(profile: SubagentProfile): AgentModelClient.ToolExecutor =
+                AgentModelClient.ToolExecutor { call ->
+                    when {
+                        call.name == AgentSubAgentTool.SPAWN_AGENTS ||
+                            call.name == SubagentCatalog.SUBAGENT_TOOL ||
+                            call.name == SubagentCatalog.PROFILE_TOOL ->
+                            errorToolResult("SUBAGENT_CANNOT_SPAWN", "子代理不能再派子代理；请自己完成这一步。")
+                        ScreenToolPolicy.isScreenTool(call.name) ->
+                            errorToolResult("SCREEN_TOOLS_UNAVAILABLE", "子代理不能操作屏幕；需要看屏幕的步骤留给主代理。")
+                        call.name == AgentTaskTool.TASK_WRITE ->
+                            errorToolResult("SUBAGENT_CANNOT_WRITE_TASKS", "子代理不能修改主代理的任务清单。")
+                        !profile.allowsTool(call.name) ->
+                            errorToolResult(
+                                "SUBAGENT_TOOL_NOT_ALLOWED",
+                                "当前子代理档案（${profile.name}）没有开放 ${call.name} 工具；用可用工具完成，或把结论交回主代理。",
+                            )
+                        else -> runToolExecutor.execute(call)
+                    }
                 }
-            }
+            // spawn_agents 走"全量非 GUI 工具"，与档案型 subagent 的能力边界区分开。
+            subAgentExecutor = childExecutorFor(SubagentCatalog.ephemeral("spawn", "", emptyList()))
             subAgentTool = AgentSubAgentTool { role, prompt, complexity ->
                 val childExecutor = subAgentExecutor
                 if (childExecutor == null) {
@@ -582,6 +612,82 @@ internal class AgentRuntimeRunExecutor(
                         AgentModelClient.ToolResult(response.content)
                     } catch (throwable: Throwable) {
                         errorToolResult("SUBAGENT_FAILED", throwable.message ?: "子代理执行失败")
+                    } finally {
+                        watchdog.interrupt()
+                        binding.close()
+                    }
+                }
+            }
+            if (subagentEnabled) {
+                subagentToolset = AgentSubagentToolset(subagentStore) { subagentRequest ->
+                    val profile = subagentRequest.profile
+                    val childExecutor = childExecutorFor(profile)
+                    // 只把档案放行的工具交给子代理：删 schema 与执行侧拦截双保险。
+                    val childTools = SubagentCatalog.filterSchemas(runTools, profile)
+                    val childController = AgentRunController()
+                    val binding = runController.register { childController.cancel() }
+                    val watchdog = Thread {
+                        try {
+                            Thread.sleep(SUB_AGENT_TIMEOUT_MS)
+                            childController.cancel()
+                        } catch (_: InterruptedException) {
+                            // 正常结束时由 finally 打断，属于预期路径。
+                        }
+                    }.apply {
+                        isDaemon = true
+                        start()
+                    }
+                    try {
+                        val rounds = SubAgentBudget.roundsFor(subagentRequest.prompt, null)
+                        val childPrompt = buildString {
+                            appendLine("你是主代理派出的 Subagent（类型：${profile.name}）。")
+                            appendLine("你看不到主对话，只依据下面的角色设定与任务说明工作。")
+                            appendLine()
+                            appendLine("<role>")
+                            appendLine(profile.systemPrompt.trim())
+                            appendLine("</role>")
+                            appendLine()
+                            appendLine("<task>")
+                            appendLine(subagentRequest.prompt)
+                            appendLine("</task>")
+                            appendLine()
+                            append(
+                                "要求：只做这一件事；做完直接给结论与证据（文件路径、命令输出、来源）。" +
+                                    "不能操作屏幕，不能再派子代理，不能反问；缺什么就用可用工具自己查清楚。",
+                            )
+                        }
+                        val response = AgentModelClient.complete(
+                            config = request.config,
+                            maxRounds = rounds,
+                            prompt = childPrompt,
+                            toolExecutor = childExecutor,
+                            history = subagentRequest.history,
+                            runController = childController,
+                            skillContext = skillContext,
+                            memoryContext = AgentMemoryContext.DISABLED,
+                            // 子代理不背作战协议：81k 字符乘以并行数会把窗口直接撑爆。
+                            userPrompt = AgentUserPromptSnapshot.EMPTY,
+                            additionalTools = childTools,
+                            executionContext = executor.terminalExecutionContext,
+                            onTranscript = { transcript ->
+                                SubagentSessionRegistry.updateTranscript(subagentRequest.sessionId, transcript)
+                            },
+                        )
+                        AgentModelClient.ToolResult(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("output", response.content)
+                                .put("rounds", rounds)
+                                .toString(),
+                        )
+                    } catch (throwable: Throwable) {
+                        AgentModelClient.ToolResult(
+                            JSONObject()
+                                .put("ok", false)
+                                .put("code", "SUBAGENT_FAILED")
+                                .put("message", throwable.message ?: "子代理执行失败")
+                                .toString(),
+                        )
                     } finally {
                         watchdog.interrupt()
                         binding.close()
