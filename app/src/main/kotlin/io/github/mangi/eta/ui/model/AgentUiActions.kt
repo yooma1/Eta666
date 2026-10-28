@@ -27,6 +27,10 @@ sealed interface AgentHomeAction {
     data object CancelMessageEdit : AgentHomeAction
     data class DeleteMessage(val id: String) : AgentHomeAction
     data class RegenerateMessage(val id: String) : AgentHomeAction
+    /** 失败提示下的“重试”：回滚到该轮起点重发同一条用户消息。 */
+    data class RetryFailedRun(val id: String) : AgentHomeAction
+    /** 失败提示下的“继续”：以一条“继续”把没跑完的任务接着推。 */
+    data object ContinueRun : AgentHomeAction
     data class SelectReplyCandidate(val id: String, val index: Int) : AgentHomeAction
     data object OpenTools : AgentHomeAction
     data object OpenSkills : AgentHomeAction

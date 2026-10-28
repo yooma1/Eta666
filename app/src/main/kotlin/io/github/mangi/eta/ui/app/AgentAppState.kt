@@ -1530,6 +1530,37 @@ internal class AgentAppState(
         )
     }
 
+    /**
+     * 失败提示下的“重试”。
+     *
+     * 复用“重新生成”的边界推导：失败提示本身没有正文，但它前面一定挂着本轮的用户消息，
+     * 因此回滚到该轮起点重发即可，既不新增用户消息，也不会把后面几轮一起冲掉。
+     */
+    fun retryFailedRun(noticeMessageId: String) {
+        regenerateMessage(noticeMessageId)
+    }
+
+    /**
+     * 失败提示下的“继续”。
+     *
+     * 追加一条“继续”让模型把没跑完的事接着做；刻意不带输入框里的待发图片/文件，
+     * 否则会把用户正在准备的内容误当成这一轮的输入。
+     */
+    fun continueRunAfterFailure(text: String = appContext.getString(R.string.run_action_continue)) {
+        if (!homeState.isConversationLoaded || homeState.isStreaming || homeState.isCompacting) return
+        val conversationId = selectedConversationId
+        if (conversationId == null || conversationId in pendingConversationDeletes) return
+        dispatchMessageToConversation(
+            conversationId = conversationId,
+            state = homeState,
+            prompt = text,
+            pendingImages = emptyList(),
+            pendingFileReferences = emptyList(),
+            editBoundary = null,
+            preserveCurrentDraft = true,
+        )
+    }
+
     fun compactCurrentContext() {
         val conversationId = selectedConversationId ?: return
         if (runStore.activeRunId(conversationId) != null || !homeState.canCompactContext || modelPickerState.isChanging) return

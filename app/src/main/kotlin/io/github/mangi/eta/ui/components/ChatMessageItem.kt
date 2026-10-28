@@ -47,6 +47,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -227,6 +228,10 @@ internal fun ChatMessageItem(
     onDeleteMessage: (String) -> Unit = {},
     onRegenerateMessage: (String) -> Unit = {},
     onSelectReplyCandidate: (String, Int) -> Unit = { _, _ -> },
+    /** 运行失败/中断提示下方的一键重跑：传提示消息 id，由上层回滚到该轮起点重发。 */
+    onRetryRun: (String) -> Unit = {},
+    /** 运行失败/中断提示下方的一键继续：以“继续”作为新的一轮把任务接着推下去。 */
+    onContinueRun: () -> Unit = {},
 ) {
     when (message) {
         is UserMessageUi -> UserMessageBubble(
@@ -256,38 +261,46 @@ internal fun ChatMessageItem(
         is SystemNoticeMessageUi -> if (message.code == SystemNoticeCode.ContextCompaction) {
             ContextCompactionMarker(message = message, modifier = modifier)
         } else {
-            AgentMessageBlock(
-                message = AgentMessageUi(
-                    id = message.id,
-                    content = buildString {
-                        append(
-                            stringResource(
-                                when (message.code) {
-                                    SystemNoticeCode.Stopped -> R.string.system_notice_stopped
-                                    SystemNoticeCode.EmptyResult -> R.string.system_notice_empty_result
-                                    SystemNoticeCode.ContextCompaction -> R.string.context_compaction
-                                    SystemNoticeCode.ModelRetry -> R.string.system_notice_model_retry
-                                    SystemNoticeCode.RuntimeFailed -> R.string.system_notice_runtime_failed
-                                    SystemNoticeCode.Interrupted -> R.string.system_notice_interrupted
-                                },
-                            ),
-                        )
-                        message.detail?.takeIf(String::isNotBlank)?.let { detail ->
-                            append("\n\n")
-                            append(detail)
-                        }
-                    },
-                    renderMarkdown = false,
-                ),
-                assistantOverlay = false,
-                retainedStreamingState = null,
-                showCopyAction = showCopyAction,
-                showMessageActions = showMessageActions,
-                messageActionsEnabled = messageActionsEnabled,
-                onDelete = { onDeleteMessage(message.id) },
-                onRegenerate = { onRegenerateMessage(message.id) },
-                modifier = modifier,
-            )
+            Column(modifier = modifier) {
+                AgentMessageBlock(
+                    message = AgentMessageUi(
+                        id = message.id,
+                        content = buildString {
+                            append(
+                                stringResource(
+                                    when (message.code) {
+                                        SystemNoticeCode.Stopped -> R.string.system_notice_stopped
+                                        SystemNoticeCode.EmptyResult -> R.string.system_notice_empty_result
+                                        SystemNoticeCode.ContextCompaction -> R.string.context_compaction
+                                        SystemNoticeCode.ModelRetry -> R.string.system_notice_model_retry
+                                        SystemNoticeCode.RuntimeFailed -> R.string.system_notice_runtime_failed
+                                        SystemNoticeCode.Interrupted -> R.string.system_notice_interrupted
+                                    },
+                                ),
+                            )
+                            message.detail?.takeIf(String::isNotBlank)?.let { detail ->
+                                append("\n\n")
+                                append(detail)
+                            }
+                        },
+                        renderMarkdown = false,
+                    ),
+                    assistantOverlay = false,
+                    retainedStreamingState = null,
+                    showCopyAction = showCopyAction,
+                    showMessageActions = showMessageActions,
+                    messageActionsEnabled = messageActionsEnabled,
+                    onDelete = { onDeleteMessage(message.id) },
+                    onRegenerate = { onRegenerateMessage(message.id) },
+                )
+                if (message.code in RunFailureNoticeCodes) {
+                    RunFailureActionsRow(
+                        enabled = messageActionsEnabled,
+                        onRetry = { onRetryRun(message.id) },
+                        onContinue = onContinueRun,
+                    )
+                }
+            }
         }
         is ThinkingMessageUi -> ThinkingRow(
             message = message,
@@ -1177,6 +1190,80 @@ private fun SuggestionChipsRow(
                 )
             }
         }
+    }
+}
+
+/** 需要在提示下方补“重试/继续”的失败态：任务没跑完，用户最可能的就是接着推。 */
+private val RunFailureNoticeCodes = setOf(
+    SystemNoticeCode.RuntimeFailed,
+    SystemNoticeCode.Interrupted,
+)
+
+/**
+ * 失败提示下方的一键操作。
+ *
+ * 重试 = 回滚到该轮起点重发同一条用户消息；继续 = 追加一条“继续”把没做完的事接着做。
+ * 两者都不需要用户重新打字，这一点是这排按钮存在的唯一理由。
+ */
+@Composable
+private fun RunFailureActionsRow(
+    enabled: Boolean,
+    onRetry: () -> Unit,
+    onContinue: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        RunFailureActionChip(
+            icon = Icons.Rounded.Refresh,
+            label = stringResource(R.string.run_action_retry),
+            enabled = enabled,
+            onClick = onRetry,
+        )
+        RunFailureActionChip(
+            icon = Icons.Rounded.PlayArrow,
+            label = stringResource(R.string.run_action_continue),
+            enabled = enabled,
+            onClick = onContinue,
+        )
+    }
+}
+
+@Composable
+private fun RunFailureActionChip(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MiuixTheme.colorScheme.surface)
+            .border(
+                0.5.dp,
+                MiuixTheme.colorScheme.outline.copy(alpha = 0.55f),
+                RoundedCornerShape(10.dp),
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(12.dp),
+            tint = if (enabled) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.disabledOnSurface,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            style = MiuixTheme.textStyles.footnote1,
+            color = if (enabled) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.disabledOnSurface,
+        )
     }
 }
 

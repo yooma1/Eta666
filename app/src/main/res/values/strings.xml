@@ -288,6 +288,8 @@
   <string name="system_notice_model_retry">Retrying model request</string>
   <string name="conversation_persistence_failed">Couldn’t save the conversation. Please try again.</string>
   <string name="system_notice_interrupted">The run was interrupted. Partial output is preserved; unfinished actions were not retried.</string>
+  <string name="run_action_retry">Retry</string>
+  <string name="run_action_continue">Continue</string>
   <string name="tool_status_unknown">Result unknown</string>
   <string name="voice_listening">Listening...</string>
   <string name="voice_processing">Processing…</string>

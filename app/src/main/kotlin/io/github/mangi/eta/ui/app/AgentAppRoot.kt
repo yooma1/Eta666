@@ -428,6 +428,8 @@ fun AgentAppRoot(
                                     }
                                 }
                                 is AgentHomeAction.SelectReplyCandidate -> agentState.selectReplyCandidate(action.id, action.index)
+                                is AgentHomeAction.RetryFailedRun -> { requestExecutionNotifications(); agentState.retryFailedRun(action.id) }
+                                AgentHomeAction.ContinueRun -> { requestExecutionNotifications(); agentState.continueRunAfterFailure() }
                                 AgentHomeAction.OpenTools -> pushRoute(AppRoute.Tools)
                                 AgentHomeAction.OpenSkills -> pushRoute(AppRoute.Skills)
                                 AgentHomeAction.OpenPermissions -> pushRoute(AppRoute.Permissions)

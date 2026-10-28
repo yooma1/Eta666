@@ -268,6 +268,8 @@
   <string name="system_notice_runtime_failed">Runtime 运行失败</string>
   <string name="conversation_persistence_failed">无法保存对话，请重试</string>
   <string name="system_notice_interrupted">任务已中断。已保留部分输出，未自动重试尚未完成的操作。</string>
+  <string name="run_action_retry">重试</string>
+  <string name="run_action_continue">继续</string>
   <string name="tool_status_unknown">结果未知</string>
   <string name="voice_listening">聆听中...</string>
   <string name="voice_processing">正在处理…</string>

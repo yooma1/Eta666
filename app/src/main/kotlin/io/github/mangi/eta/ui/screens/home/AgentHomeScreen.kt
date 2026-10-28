@@ -86,6 +86,8 @@ internal fun AgentHomeScreen(
                     onDeleteMessage = { id -> onAction(AgentHomeAction.DeleteMessage(id)) },
                     onRegenerateMessage = { id -> onAction(AgentHomeAction.RegenerateMessage(id)) },
                     onSelectReplyCandidate = { id, index -> onAction(AgentHomeAction.SelectReplyCandidate(id, index)) },
+                    onRetryFailedRun = { id -> onAction(AgentHomeAction.RetryFailedRun(id)) },
+                    onContinueRun = { onAction(AgentHomeAction.ContinueRun) },
                     onSuggestionClick = { prompt ->
                         onAction(AgentHomeAction.SubmitMessage(prompt))
                     },
