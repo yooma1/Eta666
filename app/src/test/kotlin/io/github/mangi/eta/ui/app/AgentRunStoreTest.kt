@@ -4,6 +4,7 @@ import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.GuiControlStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.After
@@ -103,4 +104,33 @@ class AgentRunStoreTest {
         round = 1, kind = AgentEvent.AssistantBlockKind.TEXT, index = 0,
         deltaChars = text.length, delta = text,
     )
+
+    @Test
+    fun hasLiveRunIgnoresRegisteredEntriesWhoseJobIsGone() {
+        val live = Job()
+        assertTrue(store.register("a", "conversation-a"))
+        // 刚登记、还没 observe 的项没有 job：不算活着——结算卡死时表里就是这种行
+        assertFalse(store.hasLiveRun("conversation-a"))
+        store.observe("a", live)
+        assertTrue(store.hasLiveRun("conversation-a"))
+        live.complete()
+        assertFalse(store.hasLiveRun("conversation-a"))
+    }
+
+    @Test
+    fun dropDeadRunsFreesConversationSoRetryCanRegisterAgain() {
+        val live = Job()
+        assertTrue(store.register("live", "conversation-a"))
+        store.observe("live", live)
+        assertTrue(store.register("dead", "conversation-b"))
+
+        assertEquals(listOf("dead"), store.dropDeadRuns("conversation-b"))
+        assertNull(store.activeRunId("conversation-b"))
+        // 死项清掉后同一会话才能重新登记，这是「点了没反应」的直接成因
+        assertTrue(store.register("retry", "conversation-b"))
+        // 真在跑的会话不许被误伤
+        assertTrue(store.hasLiveRun("conversation-a"))
+        assertTrue(store.dropDeadRuns("conversation-a").isEmpty())
+    }
+
 }
