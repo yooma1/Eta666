@@ -1,13 +1,13 @@
 name: Build APK Only
 
 on:
-  # 推送即编译（只出 APK，不碰上游、不动技能）
+  # 推送即编译（只出 APK，不碰上游、不动技能）。
+  # 注意：不再忽略 .github/workflows/*.yml —— 否则改工作流自身不会触发验证。
   push:
     branches: [ main ]
     paths-ignore:
       - 'docs/**'
       - '*.md'
-      - '.github/workflows/*.yml'
   workflow_dispatch:
     inputs:
       build_type:
@@ -20,7 +20,7 @@ on:
           - release
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-only-${{ github.ref }}
@@ -32,16 +32,16 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-provider: basic
 
@@ -52,13 +52,31 @@ jobs:
           log-accepted-android-sdk-licenses: false
 
       - name: Install Android SDK 37
-        run: sdkmanager --channel=3 "platforms;android-37.0"
+        run: |
+          set -x
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # 不同 channel 下平台包名可能是 android-37 或 android-37.0，两个都试，缺哪个装哪个
+          sdkmanager --channel=3 "platforms;android-37" \
+            || sdkmanager --channel=3 "platforms;android-37.0" \
+            || echo "::warning::platforms;android-37* 安装失败"
+          sdkmanager --channel=3 "build-tools;37.0.0" \
+            || echo "::warning::build-tools;37.0.0 安装失败"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
+
+      - name: Environment report
+        run: |
+          java -version || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          chmod +x gradlew
+          ./gradlew --version || true
 
       - name: Build debug APK
         if: inputs.build_type != 'release'
         run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug --stacktrace
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/build.log"
 
       - name: Build release APK
         if: inputs.build_type == 'release'
@@ -75,19 +93,41 @@ jobs:
           fi
           printf '%s' "$ETA_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/eta-release.jks"
           export ETA_RELEASE_STORE_FILE="$RUNNER_TEMP/eta-release.jks"
-          chmod +x gradlew
-          ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease --stacktrace
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/build.log"
+
+      # 失败根因直接写成注解：Actions 日志需要登录，注解在运行页匿名可见。
+      - name: Failure digest
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          if [ ! -f "$log" ]; then echo "::error::没有 build.log，构建可能没进到编译阶段"; exit 0; fi
+          grep -nE "^e: |error:|FAILURE:|What went wrong|Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|Unsupported|No such file|SDK location" "$log" \
+            | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          echo "---- 末尾 40 行 ----"
+          tail -40 "$log"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
 
       - name: Upload debug APK
         if: inputs.build_type != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: Eta-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
 
       - name: Upload release APK
         if: inputs.build_type == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: Eta-release
-          path: app/build/outputs/apk/release/app-release.apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
