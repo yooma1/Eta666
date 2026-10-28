@@ -30,6 +30,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # GitHub runner 在境外，访问阿里云镜像会被限流（429）导致插件解析硬失败；
+      # CI 一律直连 google()/mavenCentral()/gradlePluginPortal()。
+      ETA_NO_CN_MIRRORS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
