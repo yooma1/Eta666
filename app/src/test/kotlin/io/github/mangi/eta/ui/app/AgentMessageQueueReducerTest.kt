@@ -17,7 +17,13 @@ class AgentMessageQueueReducerTest {
 
     @Test
     fun enqueueAppendsInOrderAndClearsCurrentDraft() {
-        val image = PendingImageUi(id = "img-1", uri = "file:///1.jpg", dataUrl = "data:image/jpeg;base64,1", mimeType = "image/jpeg")
+        val image = PendingImageUi(
+            id = "img-1",
+            uri = "file:///1.jpg",
+            dataUrl = "data:image/jpeg;base64,1",
+            mimeType = "image/jpeg",
+            displayUrl = "data:image/jpeg;base64,display",
+        )
         val initial = baseState(
             isStreaming = true,
             input = "草稿",

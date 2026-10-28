@@ -211,14 +211,17 @@ data class PendingImageUi(
     val uri: String,
     /** 发给模型的预览（512 长边），也是缩略图数据源。 */
     val dataUrl: String,
+    val mimeType: String,
     /**
      * 看图器与历史消息用的展示副本（1600 长边 / q88）。
      *
      * 为什么不直接拿 [uri]（原图）：4000×3000 原图解出来是 48MB ARGB 位图，多开几张就 OOM；
      * 也不能复用 [dataUrl]：512 长边铺到全屏就是糊的，那正是「点开大图还是模糊」的原因。
+     *
+     * 放在末尾并默认回落到 [dataUrl]：这是新增字段，旧调用点（含单测）不必逐个改，
+     * 但凡是没显式给的地方，看图器就退化成预览档——所以真正生产路径必须显式传。
      */
-    val displayUrl: String,
-    val mimeType: String,
+    val displayUrl: String = dataUrl,
 )
 
 @Immutable
