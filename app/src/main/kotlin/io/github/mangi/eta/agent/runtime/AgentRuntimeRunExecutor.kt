@@ -624,7 +624,14 @@ internal class AgentRuntimeRunExecutor(
                     val profile = subagentRequest.profile
                     val childExecutor = childExecutorFor(profile)
                     // 只把档案放行的工具交给子代理：删 schema 与执行侧拦截双保险。
+                    // MCP 工具按档案过滤；内置工具走 allowedToolNames 在 schema 层再过滤一次。
+                    // 两处都要过：MCP 不在 AgentToolCatalog 里，内置的不在 runTools 里。
                     val childTools = SubagentCatalog.filterSchemas(runTools, profile)
+                    val childAllowedTools = if ("*" in profile.allowedTools || profile.allowedTools.isEmpty()) {
+                        null
+                    } else {
+                        profile.allowedTools - SubagentCatalog.FORBIDDEN_TOOLS
+                    }
                     val childController = AgentRunController()
                     val binding = runController.register { childController.cancel() }
                     val watchdog = Thread {
@@ -693,6 +700,7 @@ internal class AgentRuntimeRunExecutor(
                             // 子代理不背作战协议：81k 字符乘以并行数会把窗口直接撑爆。
                             userPrompt = AgentUserPromptSnapshot.EMPTY,
                             additionalTools = childTools,
+                            allowedToolNames = childAllowedTools,
                             executionContext = executor.terminalExecutionContext,
                             onTranscript = { transcript ->
                                 SubagentSessionRegistry.updateTranscript(subagentRequest.sessionId, transcript)

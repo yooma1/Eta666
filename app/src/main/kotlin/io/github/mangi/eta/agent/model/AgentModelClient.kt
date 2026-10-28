@@ -100,6 +100,14 @@ internal object AgentModelClient {
         skillContext: SkillContext = SkillContext.EMPTY,
         memoryContext: AgentMemoryContext = AgentMemoryContext.DISABLED,
         additionalTools: JSONArray = JSONArray(),
+        /**
+         * 只允许这些工具名出现在 schema 里；null 表示不限制（主 Agent 走默认）。
+         *
+         * 为什么必须在 schema 层过滤而不是只在执行层拦：模型是照着 schema 决策的，
+         * 把不该用的工具摆在那里、等它调用再报错，等于让它先想错再改错——它会反复试，
+         * 把轮次烧在「为什么这个工具不让我用」上。子代理的档案白名单要在这里生效。
+         */
+        allowedToolNames: Set<String>? = null,
         executionContext: TerminalExecutionContext? = null,
         capabilitiesProvider: () -> AgentToolCapabilities = { AgentToolCapabilities(rootAvailable = false) },
         sessionId: String = java.util.UUID.randomUUID().toString(),
@@ -178,7 +186,15 @@ internal object AgentModelClient {
             for (index in 0 until additionalTools.length()) {
                 tools.put(additionalTools.opt(index))
             }
-            return tools
+            if (allowedToolNames == null) return tools
+            // 过滤后按名字重建：直接把不合法项从原数组剔除更省，但 JSONArray 没有 remove。
+            val filtered = JSONArray()
+            for (index in 0 until tools.length()) {
+                val item = tools.optJSONObject(index) ?: continue
+                val name = item.optJSONObject("function")?.optString("name").orEmpty()
+                if (name.isNotEmpty() && name in allowedToolNames) filtered.put(item)
+            }
+            return filtered
         }
         val tools = toolsFor(initialCapabilities)
         onEvent(
