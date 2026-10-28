@@ -103,8 +103,15 @@ jobs:
         run: |
           log="$RUNNER_TEMP/build.log"
           if [ ! -f "$log" ]; then echo "::error::没有 build.log，构建可能没进到编译阶段"; exit 0; fi
-          grep -nE "^e: |error:|FAILURE:|What went wrong|Caused by:|Execution failed|> Task .* FAILED|Could not (resolve|download|find)|Unsupported|No such file|SDK location" "$log" \
-            | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          reason="$(awk '/What went wrong/{flag=1} flag{print} /^\* Try:/{if(flag) exit}' "$log" | head -40)"
+          if [ -z "$reason" ]; then
+            reason="$(grep -nE '^e: |error:|Caused by:|Execution failed|> Task .* FAILED' "$log" | head -20)"
+          fi
+          if [ -z "$reason" ]; then reason="$(tail -30 "$log")"; fi
+          reason="${reason//'%'/'%25'}"
+          reason="${reason//$'\r'/}"
+          reason="${reason//$'\n'/'%0A'}"
+          echo "::error title=Build 失败原因::$reason"
           echo "---- 末尾 40 行 ----"
           tail -40 "$log"
 
