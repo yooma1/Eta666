@@ -20,7 +20,8 @@ on:
           - release
 
 permissions:
-  contents: read
+  # 提交构建摘要到 ci-status 分支需要写权限；其余步骤只读。
+  contents: write
 
 concurrency:
   group: build-only-${{ github.ref }}
@@ -154,3 +155,58 @@ jobs:
           name: Eta-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
+
+      # 把本次结果写进 ci-status 分支：仓库 Actions 日志要 admin 才能下载（403），
+      # 但任何人都能用部署私钥把仓库拉下来。所以「怎么失败的」放在 git 里，比放在
+      # artifact 里更有用——artifact 匿名下载是 401。
+      - name: Publish CI status to ci-status branch
+        if: always()
+        env:
+          SHA: ${{ github.sha }}
+          SHORT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          JOB_STATUS: ${{ job.status }}
+          WORKFLOW: ${{ github.workflow }}
+          REF_NAME: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          short="$(printf '%s' "$SHA" | cut -c1-7)"
+          mkdir -p /tmp/ci-out
+          out="/tmp/ci-out/${short}.md"
+          {
+            echo "# ${WORKFLOW} · ${short}"
+            echo
+            echo "- 结论: **${JOB_STATUS}**"
+            echo "- 分支: \`${REF_NAME}\`"
+            echo "- Run: #${RUN_NUMBER} (id ${RUN_ID})"
+            echo "- 提交: \`${SHA}\`"
+            echo "- 时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "## 步骤"
+            echo
+            echo "见同 Run 的 artifacts（build-log）。日志本步无法读取，故只记结论。"
+            for f in "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/test.log"; do
+              [ -f "$f" ] || continue
+              echo
+              echo "## \`$(basename "$f")\` 末尾 60 行"
+              echo
+              echo '```'
+              tail -60 "$f"
+              echo '```'
+            done
+          } > "$out"
+          cd "$RUNNER_TEMP"
+          git init -q ci-status
+          cd ci-status
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # 用孤儿分支，避免和 main 的历史互相干扰
+          git checkout -q --orphan ci-status
+          cp "$out" .
+          echo "最近更新: ${short} (${JOB_STATUS})" > LAST.txt
+          git add .
+          git commit -q -m "ci: ${short} ${JOB_STATUS} (run #${RUN_NUMBER})"
+          git push -q --force origin ci-status
