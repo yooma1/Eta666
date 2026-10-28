@@ -893,6 +893,172 @@ class AgentModelClientLoopTest {
         assertEquals(1, events.filterIsInstance<AgentEvent.ToolStarted>().size)
     }
 
+    @Test
+    fun goalKeepsRunningUntilTheModelReportsDone() {
+        val provider = ScriptedProvider(listOf(
+            { _, _ -> assistant(content = "第一段做完了", finishReason = "stop") },
+            { _, _ -> assistant(content = "全部做完 <goal_status>done</goal_status>", finishReason = "stop") },
+        ))
+
+        val result = AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            goal = "把首页做完",
+        )
+
+        assertEquals(2, provider.requests.size)
+        // 目标必须进系统提示，否则模型下一轮就忘了自己在追什么。
+        assertTrue(provider.requests[0].toString().contains("<goal>"))
+        assertTrue(provider.requests[1].toString().contains("继续推进目标"))
+        // 完成标记是运行时信号，不能出现在给用户看的正文里。
+        assertFalse(result.content.contains("goal_status"))
+        assertTrue(result.content.contains("全部做完"))
+    }
+
+    @Test
+    fun cancelledGoalFinishesAfterTheCurrentTurn() {
+        val controller = AgentRunController().also { it.cancelGoal() }
+        val provider = ScriptedProvider(listOf(
+            { _, _ -> assistant(content = "只做了一部分", finishReason = "stop") },
+        ))
+
+        val result = AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            runController = controller,
+            goal = "把首页做完",
+        )
+
+        // 用户取消后只允许当前 turn 收尾，不能偷偷再来一轮。
+        assertEquals(1, provider.requests.size)
+        assertEquals("只做了一部分", result.content)
+    }
+
+    @Test
+    fun goalStopsAtTheHardContinuationCapInsteadOfLoopingForever() {
+        val provider = ScriptedProvider(
+            List(20) { index ->
+                { _: ProviderRequest, _: AgentRunController ->
+                    assistant(content = "第 ${index + 1} 轮还没做完", finishReason = "stop")
+                }
+            },
+        )
+
+        val result = AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            goal = "一个永远做不完的目标",
+        )
+
+        // 上限是硬性的：含糊目标下模型不会自己认输，没有上限就是无限烧 token。
+        assertTrue("续跑轮数应受上限约束，实际 ${provider.requests.size}", provider.requests.size in 13..15)
+        assertTrue(provider.requests.last().toString().contains("目标已连续推进"))
+        assertTrue(result.content.isNotBlank())
+    }
+
+    @Test
+    fun doneStatusIsIgnoredWhileTheChecklistStillHasOpenItems() {
+        // 这是"目标模式跑一会儿就停"的主因：模型做了一部分就直接报 done，
+        // 旧逻辑看到 done 立刻收工，完全没看清单里还剩几条。
+        val provider = ScriptedProvider(listOf(
+            { _, _ -> assistant(content = "做完了 <goal_status>done</goal_status>", finishReason = "stop") },
+            { _, _ -> assistant(content = "确实完成 <goal_status>done</goal_status>", finishReason = "stop") },
+        ))
+        var checks = 0
+
+        AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            goal = "把首页做完",
+            goalProgress = {
+                checks++
+                if (checks == 1) {
+                    GoalProgress(total = 3, done = 1, open = 2, allDone = false)
+                } else {
+                    GoalProgress(total = 3, done = 3, open = 0, allDone = true)
+                }
+            },
+        )
+
+        assertEquals("清单还有待办时，模型的 done 不该结束目标", 2, provider.requests.size)
+    }
+
+    @Test
+    fun finishedTaskListStopsGoalContinuationEvenIfNothingSaysDone() {
+        val provider = ScriptedProvider(listOf(
+            { _, _ -> assistant(content = "看起来差不多了", finishReason = "stop") },
+        ))
+
+        AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            goal = "把首页做完",
+            goalProgress = { GoalProgress(total = 3, done = 3, open = 0, allDone = true) },
+        )
+
+        // 清单全绿就是完成，不需要模型额外报一次 done。
+        assertEquals(1, provider.requests.size)
+    }
+
+    @Test
+    fun openTasksForceAnotherRoundEvenWhenTheModelSoundsFinished() {
+        val provider = ScriptedProvider(listOf(
+            { _, _ -> assistant(content = "已经做完了", finishReason = "stop") },
+            { _, _ -> assistant(content = "全部完成 <goal_status>done</goal_status>", finishReason = "stop") },
+        ))
+        var checks = 0
+
+        AgentModelClient.complete(
+            modelConfig(), "推进目标",
+            AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+            provider = provider,
+            goal = "把首页做完",
+            goalProgress = {
+                checks++
+                if (checks == 1) {
+                    GoalProgress(total = 3, done = 1, open = 2, allDone = false)
+                } else {
+                    GoalProgress(total = 3, done = 3, open = 0, allDone = true)
+                }
+            },
+        )
+
+        // 模型说"已经做完"不算数，清单还有 2 条没勾就得继续。
+        assertEquals(2, provider.requests.size)
+        assertTrue(provider.requests[1].toString().contains("还有 2 条待办"))
+    }
+
+    @Test
+    fun roundCapStopsASubAgentThatKeepsCallingTools() {
+        var index = 0
+        val provider = ScriptedProvider(List(10) {
+            { _, _ ->
+                index++
+                assistant(
+                    finishReason = "tool_calls",
+                    toolCalls = listOf(toolCall("c$index", "get_current_context", "{}")),
+                )
+            }
+        })
+
+        assertThrows(AgentModelExecutionException::class.java) {
+            AgentModelClient.complete(
+                modelConfig(), "做点事",
+                AgentModelClient.ToolExecutor { AgentModelClient.ToolResult("""{"ok":true}""") },
+                provider = provider,
+                maxRounds = 2,
+            )
+        }
+
+        // 没有上限时这个脚本会一直跑下去：子代理必须能被硬性截停。
+        assertEquals(2, provider.requests.size)
+    }
+
     private class ScriptedProvider(
         private val responses: List<(ProviderRequest, AgentRunController) -> JSONObject>,
     ) : AgentProviderClient {

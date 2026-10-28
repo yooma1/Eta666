@@ -71,6 +71,17 @@ internal object AgentImageCodec {
         image: AgentModelClient.ModelImage,
     ): AgentModelClient.ModelImage? = AgentModelImageEncoder.preview(context, image)
 
+    /**
+     * 看图器专用：1600 长边的展示副本。
+     *
+     * 为什么不再拿 [previewFromReference] 那张：预览只有 512 长边 / 25.6 万像素 / q80，
+     * 缩略图够用，铺到全屏就是一团糊——这正是「点开大图还是模糊」的原因。
+     */
+    fun displayFromReference(
+        context: Context,
+        image: AgentModelClient.ModelImage,
+    ): AgentModelClient.ModelImage? = AgentModelImageEncoder.display(context, image)
+
     /** 文件工具图片会在发送模型前压缩，避免多张原图撑大 OpenAI 兼容请求体。 */
     fun fromToolFile(file: File, source: String): AgentModelClient.ModelImage? = runCatching {
         AgentModelImageEncoder.toolVision(file.readBytesLimited(), source)

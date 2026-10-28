@@ -423,6 +423,7 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.Terminal -> stringResource(R.string.route_terminal)
     is AppRoute.Tools -> stringResource(R.string.route_tools)
     is AppRoute.WebToolsSettings -> stringResource(R.string.web_tools_settings_title)
+    is AppRoute.Subagent -> stringResource(R.string.subagent_page_title)
     is AppRoute.Skills -> stringResource(R.string.route_skills)
     is AppRoute.Subagents -> "Subagent"
     is AppRoute.Characters -> "角色"
@@ -440,6 +441,7 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.AppearanceSettings -> stringResource(R.string.appearance_title)
     is AppRoute.DataBackup -> stringResource(R.string.data_backup_title)
     is AppRoute.Memory -> stringResource(R.string.route_memory)
+    is AppRoute.UserPrompt -> "作战协议"
     is AppRoute.LinuxEnvironment -> stringResource(R.string.route_linux_environment)
     is AppRoute.Workspace -> stringResource(R.string.capability_workspace)
     is AppRoute.SharedFolders -> stringResource(R.string.route_shared_folders)

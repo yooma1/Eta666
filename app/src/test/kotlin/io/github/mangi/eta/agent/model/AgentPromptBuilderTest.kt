@@ -159,7 +159,7 @@ class AgentPromptBuilderTest {
     }
 
     @Test
-    fun browserAndSkillMessagesAreConditionalAndStructurallyComplete() {
+    fun browserMessageIsConditionalAndSkillIndexIsNotInjected() {
         val skill = SkillIndexEntry(
             id = "screen-audit",
             name = "屏幕审计",
@@ -183,18 +183,17 @@ class AgentPromptBuilderTest {
             skillContext = SkillContext(installedSkills = listOf(skill)),
         )
 
-        assertEquals(listOf("system", "system", "system", "system", "user"), messages.roles())
+        // 技能索引已停用：installedSkills 不再进提示词，system 只剩主提示、浏览器说明、（可选的）subagent 说明。
+        val roles = messages.roles()
+        assertEquals(1, roles.count { it == "user" })
+        assertTrue(roles.dropLast(1).all { it == "system" })
         val systemContents = messages.systemContents()
         assertTrue(systemContents.any { it.contains("browser_use") })
         assertFalse(systemContents.any { it.contains("只需 command") })
-        assertTrue(messages.getJSONObject(2).getString("content").contains("可调用 subagent 派发子智能体"))
-        val skillMessage = systemContents.single { it.contains("id=screen-audit") }
-        assertEquals(skillMessage, messages.getJSONObject(3).getString("content"))
-        assertTrue(skillMessage.contains("path=/skills/screen-audit/SKILL.md"))
-        assertTrue(skillMessage.contains("capabilities=scripts, assets"))
-        assertTrue(skillMessage.contains("description=检查屏幕 并输出 结论"))
-        assertTrue(skillMessage.contains("先调用 skills_read"))
-        assertEquals("读取网页", messages.getJSONObject(4).getString("content"))
+        // 技能索引确实没被注入：installedSkills 里的条目一个都不该出现在 system 消息里。
+        assertFalse(systemContents.any { it.contains("id=screen-audit") })
+        assertFalse(systemContents.any { it.contains("已启用 Skills 索引") })
+        assertEquals("读取网页", messages.getJSONObject(messages.length() - 1).getString("content"))
     }
 
     @Test
@@ -213,6 +212,45 @@ class AgentPromptBuilderTest {
         assertFalse(disabled.any { it.contains(subagentGuidance) })
         assertEquals(1, enabled.count { it.contains(subagentGuidance) })
         assertEquals(disabled, enabled.filterNot { it.contains(subagentGuidance) })
+    }
+
+    @Test
+    fun redteamProtocolIsInjectedOnlyWhenProvided() {
+        fun systemContentsOf(protocol: String): List<String> =
+            AgentPromptBuilder.buildInitialMessages(
+                config = modelConfig("", terminalTools = false, browserTools = false),
+                prompt = "测试",
+                images = emptyList(),
+                history = emptyList(),
+                skillContext = SkillContext(),
+                redteamProtocol = protocol,
+            ).systemContents()
+
+        assertTrue(systemContentsOf("").none { it.contains("<redteam_protocol>") })
+        val injected = systemContentsOf("# 红队协议\n指挥职责")
+        assertTrue(injected.any { it.contains("<redteam_protocol>") && it.contains("指挥职责") })
+        // 正文是包在标签里的，不额外改写原文
+        assertTrue(injected.none { it.contains("# 红队协议") && !it.contains("<redteam_protocol>") })
+    }
+
+    @Test
+    fun reverseDeliveryContractIsInjectedOnlyWhenReverseModeEnabled() {
+        fun systemContentsOf(reverseModeEnabled: Boolean): List<String> {
+            val messages = AgentPromptBuilder.buildInitialMessages(
+                config = modelConfig("", terminalTools = false, browserTools = false),
+                prompt = "逆向分析目标应用",
+                images = emptyList(),
+                history = emptyList(),
+                skillContext = SkillContext(reverseModeEnabled = reverseModeEnabled),
+            )
+            return messages.systemContents()
+        }
+
+        val contract = systemContentsOf(reverseModeEnabled = true).single { it.contains("交付契约") }
+        assertTrue(contract.contains("逆向模式已开启"))
+        assertTrue(contract.contains("TARGET/HOST/PORT/TOKEN/OFFSET/SYMBOL/HOOK_FN/TARGET_PKG"))
+        assertTrue(contract.contains("skills_read"))
+        assertFalse(systemContentsOf(reverseModeEnabled = false).any { it.contains("交付契约") })
     }
 
     @Test
@@ -259,6 +297,28 @@ class AgentPromptBuilderTest {
         assertTrue(memory.contains("revision=${"b".repeat(64)}"))
         assertTrue(memory.contains("用户以前偏好中文"))
         assertEquals("现在改用英文回答", messages.getJSONObject(messages.length() - 1).getString("content"))
+    }
+
+    @Test
+    fun goalBecomesItsOwnSystemMessageAndVanishesWhenBlank() {
+        fun systemContents(goal: String) = AgentPromptBuilder.buildSystemMessages(
+            config = modelConfig("", terminalTools = false, browserTools = false),
+            skillContext = SkillContext.EMPTY,
+            memoryContext = AgentMemoryContext.DISABLED,
+            rootAvailable = false,
+            goal = goal,
+        ).systemContents()
+
+        val withGoal = systemContents("把首页的排队引导做完")
+        val goalMessage = withGoal.single { it.contains("<goal>") }
+        assertTrue(goalMessage.contains("把首页的排队引导做完"))
+        // 完成信号必须写进提示词，否则循环无法判断什么时候该停。
+        assertTrue(goalMessage.contains("<goal_status>done</goal_status>"))
+        assertTrue(goalMessage.contains("<goal_status>blocked</goal_status>"))
+
+        // 没有目标时不能凭空多出一条 system 消息（部分服务商对空 system 直接 400）。
+        assertEquals(withGoal.size - 1, systemContents("").size)
+        assertTrue(systemContents("   \n ").none { it.contains("<goal>") })
     }
 
     private fun modelConfig(

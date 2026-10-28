@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.runtime.AgentTokenUsage
+import io.github.mangi.eta.data.model.ProviderTypes
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -29,6 +30,9 @@ class AgentContextCompactionTest {
         baseUrl = "https://example.invalid", apiKey = "fixture", model = "fixture", systemPrompt = "固定约束",
         contextWindow = 128_000,
     )
+
+    /** 思考签名只对原生 Anthropic 请求生效，锁死压缩的场景必须显式声明该 provider。 */
+    private val anthropicConfig = config.copy(providerType = ProviderTypes.ANTHROPIC)
 
     @Test
     fun largeHistoryWithoutUsageDoesNotTriggerCompaction() {
@@ -196,7 +200,7 @@ class AgentContextCompactionTest {
         messages.put(JSONObject().put("role", "tool").put("tool_call_id", "toolu_current")
             .put("content", "工具结果"))
         val original = messages.toString()
-        val session = AgentContextSession(config, messages, 1, "operation", provider { _, _ ->
+        val session = AgentContextSession(anthropicConfig, messages, 1, "operation", provider { _, _ ->
             fail("签名未用前不能改写历史")
             response("不应执行")
         }, AgentRunController(), { emptySet() }, {}, { fail("不应提交快照") })
@@ -207,6 +211,83 @@ class AgentContextCompactionTest {
         assertEquals("ANTHROPIC_THINKING_CONTEXT_LOCKED", failure.code)
         assertEquals(original, messages.toString())
         assertNull(session.snapshot())
+    }
+
+    @Test
+    fun crossProviderToolRoundDoesNotLockCompaction() {
+        // 换模型后历史仍带 Anthropic 思考块，但请求不再发给 Anthropic：不应再被"签名锁"静默跳过压缩。
+        val messages = jsonHistory()
+        messages.put(AgentConversationCodec.userTextMessage("继续查询"))
+        val assistant = JSONObject().put("role", "assistant").put("content", "读取中")
+            .put("tool_calls", JSONArray().put(JSONObject().put("id", "toolu_current")
+                .put("type", "function").put("function", JSONObject().put("name", "device_info")
+                    .put("arguments", "{}"))))
+        AnthropicEphemeralState.attachContentBlocks(assistant, JSONArray()
+            .put(JSONObject().put("type", "thinking").put("thinking", "")
+                .put("signature", "CURRENT_SIGNATURE")))
+        messages.put(assistant)
+        messages.put(JSONObject().put("role", "tool").put("tool_call_id", "toolu_current")
+            .put("content", "工具结果"))
+        messages.put(JSONObject().put("role", "assistant").put("content", "查询完成"))
+        messages.put(AgentConversationCodec.userTextMessage("新的问题必须保留"))
+
+        var summaries = 0
+        val compacted = AgentContextCompactor(config, provider { request, _ ->
+            if (request.purpose == ProviderRequestPurpose.COMPACTION) summaries++
+            response("此前任务已完成。")
+        }, AgentRunController()).compact(messages, 1, emptySet())
+
+        assertEquals(1, summaries)
+        assertTrue(compacted.toString().contains("新的问题必须保留"))
+        assertFalse(compacted.toString().contains("CURRENT_SIGNATURE"))
+    }
+
+    @Test
+    fun unknownContextWindowStillCompactsByEstimatedSize() {
+        // 中转/自定义端点没有窗口元数据：换到这类模型后自动压缩过去会被整体关闭，
+        // 现在按消息体积估算照常触发（有窗口、无 usage 的场景见下一条用例）。
+        var summaries = 0
+        val bigHistory = (1..6).flatMap { turn -> listOf(
+            AgentModelClient.ConversationMessage("user", "问题 $turn"),
+            AgentModelClient.ConversationMessage("assistant", "事实 ".repeat(20_000)),
+        ) }
+        val result = AgentModelClient.complete(
+            config.copy(contextWindow = null), "最新请求必须保留",
+            AgentModelClient.ToolExecutor { error("不应执行工具") },
+            history = bigHistory,
+            provider = provider { request, _ ->
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    response("此前任务已完成。")
+                } else {
+                    response("完成最新请求")
+                }
+            },
+        )
+        assertTrue("估算阈值未触发压缩", summaries > 0)
+        assertEquals(listOf("完成最新请求"), result.transcript.map { it.content })
+        assertTrue(checkNotNull(result.contextSnapshot).messages.any { it.contextSummary })
+    }
+
+    @Test
+    fun knownContextWindowStillAutoCompactsWhenProviderReportsNoUsage() {
+        // 流式接口不带 usage（DeepSeek 等常见）时 provider 永远不回报 token 数。
+        // 之前这种情况 before 恒为 null，自动压缩永不触发，只能人工强制压缩。
+        val original = "历史事实".repeat(120_000)
+        var summaries = 0
+        val result = AgentModelClient.complete(config, "继续", AgentModelClient.ToolExecutor { error("不应执行工具") },
+            history = listOf(AgentModelClient.ConversationMessage("assistant", original)),
+            provider = provider { request, _ ->
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    response("此前任务已完成。")
+                } else {
+                    assertFalse(request.messages.toString().contains(original))
+                    response("完成")
+                }
+            })
+        assertTrue("估算阈值未触发自动压缩", summaries > 0)
+        assertNotNull(result.contextSnapshot)
     }
 
     @Test
@@ -316,6 +397,32 @@ class AgentContextCompactionTest {
         assertNotNull(result.contextSnapshot)
         assertEquals(finalText, result.contextSnapshot!!.messages.last().content)
         assertEquals(finalText, result.transcript.last().content)
+    }
+
+    @Test
+    fun declaredWindowTriggersCompactionEarlierThanFallback() {
+        // 目录声明值（8k）比兜底假定（32k）小：应按声明值×0.6 提前触发压缩，
+        // 说明"声明数字不可信但可用来提前触发"这条通道真的生效。
+        var summaries = 0
+        val history = listOf(
+            AgentModelClient.ConversationMessage("user", "问题"),
+            AgentModelClient.ConversationMessage("assistant", "事实 ".repeat(10_000)),
+        )
+        val result = AgentModelClient.complete(
+            config.copy(contextWindow = null, declaredContextWindow = 8_000), "最新请求必须保留",
+            AgentModelClient.ToolExecutor { error("不应执行工具") },
+            history = history,
+            provider = provider { request, _ ->
+                if (request.purpose == ProviderRequestPurpose.COMPACTION) {
+                    summaries++
+                    response("此前任务已完成。")
+                } else {
+                    response("完成最新请求")
+                }
+            },
+        )
+        assertTrue("声明窗口未触发提前压缩", summaries > 0)
+        assertTrue(checkNotNull(result.contextSnapshot).messages.any { it.contextSummary })
     }
 
     private fun history() = (1..6).flatMap { turn -> listOf(

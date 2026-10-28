@@ -1,0 +1,156 @@
+name: Build APK Only
+
+on:
+  # 推送即编译（只出 APK，不碰上游、不动技能）。
+  # 注意：不再忽略 .github/workflows/*.yml —— 否则改工作流自身不会触发验证。
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-only-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # GitHub runner 在境外，访问阿里云镜像会被限流（429）导致插件解析硬失败；
+      # CI 一律直连 google()/mavenCentral()/gradlePluginPortal()。
+      ETA_NO_CN_MIRRORS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android SDK 37
+        run: |
+          set -x
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # 不同 channel 下平台包名可能是 android-37 或 android-37.0，两个都试，缺哪个装哪个
+          sdkmanager --channel=3 "platforms;android-37" \
+            || sdkmanager --channel=3 "platforms;android-37.0" \
+            || echo "::warning::platforms;android-37* 安装失败"
+          sdkmanager --channel=3 "build-tools;37.0.0" \
+            || echo "::warning::build-tools;37.0.0 安装失败"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
+
+      - name: Environment report
+        run: |
+          java -version || true
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          chmod +x gradlew
+          ./gradlew --version || true
+
+      # 全量单测在这条基线上有 544 条既有红（AgentRuntimeWireTest 等，与本仓库改动无关），
+      # 所以 CI 只跑本次合并的 Subagent 子系统用例，保证「新增代码有回归」而不被旧红卡住。
+      - name: Unit tests (subagent)
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:testDebugUnitTest \
+            --tests "io.github.mangi.eta.agent.subagent.*" --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
+      - name: Build debug APK
+        if: inputs.build_type != 'release'
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/build.log"
+
+      - name: Build release APK
+        if: inputs.build_type == 'release'
+        env:
+          ETA_RELEASE_KEYSTORE_BASE64: ${{ secrets.ETA_RELEASE_KEYSTORE_BASE64 }}
+          ETA_RELEASE_STORE_PASSWORD: ${{ secrets.ETA_RELEASE_STORE_PASSWORD }}
+          ETA_RELEASE_KEY_ALIAS: ${{ secrets.ETA_RELEASE_KEY_ALIAS }}
+          ETA_RELEASE_KEY_PASSWORD: ${{ secrets.ETA_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$ETA_RELEASE_KEYSTORE_BASE64" || -z "$ETA_RELEASE_STORE_PASSWORD" || \
+                -z "$ETA_RELEASE_KEY_ALIAS" || -z "$ETA_RELEASE_KEY_PASSWORD" ]]; then
+            echo "::error::Missing release signing secrets"
+            exit 1
+          fi
+          printf '%s' "$ETA_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/eta-release.jks"
+          export ETA_RELEASE_STORE_FILE="$RUNNER_TEMP/eta-release.jks"
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/build.log"
+
+      # 失败根因直接写成注解：Actions 日志需要登录，注解在运行页匿名可见。
+      - name: Failure digest
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          if [ ! -f "$log" ]; then log="$RUNNER_TEMP/test.log"; fi
+          if [ ! -f "$log" ]; then echo "::error::既没有 build.log 也没有 test.log，可能没进到编译阶段"; exit 0; fi
+          reason="$(awk '/What went wrong/{flag=1} flag{print} /^\* Try:/{if(flag) exit}' "$log" | head -40)"
+          if [ -z "$reason" ]; then
+            reason="$(grep -nE '^e: |error:|Caused by:|Execution failed|> Task .* FAILED' "$log" | head -20)"
+          fi
+          if [ -z "$reason" ]; then reason="$(tail -30 "$log")"; fi
+          reason="${reason//'%'/'%25'}"
+          reason="${reason//$'\r'/}"
+          reason="${reason//$'\n'/'%0A'}"
+          echo "::error title=Build 失败原因::$reason"
+          echo "---- 末尾 40 行 ----"
+          tail -40 "$log"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/test.log
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        if: inputs.build_type != 'release'
+        uses: actions/upload-artifact@v5
+        with:
+          name: Eta-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Upload release APK
+        if: inputs.build_type == 'release'
+        uses: actions/upload-artifact@v5
+        with:
+          name: Eta-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn

@@ -1,6 +1,8 @@
 package io.github.mangi.eta.ui.model
 
+import android.net.Uri
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.repository.AgentUserPromptMode
 
 sealed interface AgentHomeAction {
     data object LoadEarlierMessages : AgentHomeAction
@@ -55,6 +57,7 @@ sealed interface AgentSkillsAction {
     data object CancelZipReplacement : AgentSkillsAction
     data object DismissNotice : AgentSkillsAction
     data class ToggleSkill(val skillId: String, val enabled: Boolean) : AgentSkillsAction
+    data class ToggleReverseMode(val enabled: Boolean) : AgentSkillsAction
     data class DeleteSkill(val skillId: String) : AgentSkillsAction
     data class ReinstallBuiltin(val skillId: String) : AgentSkillsAction
 }
@@ -68,8 +71,76 @@ sealed interface AgentSystemEnhanceAction {
 sealed interface AgentMemoryAction {
     data object NavigateBack : AgentMemoryAction
     data class ToggleEnabled(val enabled: Boolean) : AgentMemoryAction
+    data class ToggleAutoExperience(val enabled: Boolean) : AgentMemoryAction
+    data class ToggleSmartRetain(val enabled: Boolean) : AgentMemoryAction
+    data class ToggleSemanticRecall(val enabled: Boolean) : AgentMemoryAction
+    data object TestChatSemanticRetrieval : AgentMemoryAction
+    data class ToggleEmbeddingAccelerator(val enabled: Boolean) : AgentMemoryAction
+    data object TestEmbeddingProvider : AgentMemoryAction
+    data class SaveSemanticModel(val model: String) : AgentMemoryAction
+    data object BuildSemanticIndex : AgentMemoryAction
+    data class ToggleGraphRecall(val enabled: Boolean) : AgentMemoryAction
+    data object ClassifyExistingRelations : AgentMemoryAction
+    data class ReviewMemoryLink(
+        val sourceId: String, val targetId: String, val type: String, val status: String,
+    ) : AgentMemoryAction
+    data class DeleteRetainedMemory(val id: String) : AgentMemoryAction
+    data object ClearRetainedMemory : AgentMemoryAction
+    data object ClearExperiences : AgentMemoryAction
+    data class SaveWebDav(
+        val endpoint: String,
+        val username: String,
+        val password: String,
+        val passphrase: String,
+    ) : AgentMemoryAction
+    data object RunWebDavSync : AgentMemoryAction
+    data object ConfirmWebDavMemoryResolution : AgentMemoryAction
+    data class ToggleWebDavAutoSync(val enabled: Boolean) : AgentMemoryAction
+    data object ClearWebDavConfig : AgentMemoryAction
+    data class SaveKnowledge(
+        val title: String,
+        val content: String,
+        val kind: String,
+        val source: String,
+        val tags: List<String>,
+        val id: String? = null,
+        val revision: String? = null,
+    ) : AgentMemoryAction
+    data class DeleteKnowledge(val id: String, val revision: String) : AgentMemoryAction
     data class DraftChanged(val content: String) : AgentMemoryAction
     data object Save : AgentMemoryAction
     data object Clear : AgentMemoryAction
     data object DismissNotice : AgentMemoryAction
+}
+
+internal sealed interface AgentUserPromptAction {
+    data object NavigateBack : AgentUserPromptAction
+
+    data class ModeChanged(val mode: AgentUserPromptMode) : AgentUserPromptAction
+
+    data class DraftChanged(val content: String) : AgentUserPromptAction
+
+    data object Save : AgentUserPromptAction
+
+    /** 重新读取磁盘上的文件（会话中途改过文件时用来刷新预览）。 */
+    data object Reload : AgentUserPromptAction
+
+    data object Clear : AgentUserPromptAction
+
+    data object DismissNotice : AgentUserPromptAction
+
+    /** 从系统文件选择器拿到 uri——先读进来待确认，不直接落盘。 */
+    data class Import(val uri: Uri) : AgentUserPromptAction
+
+    data object ConfirmImport : AgentUserPromptAction
+
+    data object CancelImport : AgentUserPromptAction
+
+    /** 内容太长被降级成只读预览后，显式要求把全文放进编辑区。 */
+    data object OpenEditor : AgentUserPromptAction
+
+    /** 把随包内置的破甲记忆装配成效文件（覆盖当前，旧文件先备份）。 */
+    data object InstallBuiltin : AgentUserPromptAction
+    /** 破甲记忆注入开关：与逆向能力开关平级，各管各的。 */
+    data class EnabledChanged(val enabled: Boolean) : AgentUserPromptAction
 }

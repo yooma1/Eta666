@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.skill
 
 import android.content.Context
 import android.content.res.AssetManager
+import android.util.Log
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.db.SkillRegistryEntity
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 
@@ -193,11 +195,19 @@ private class BuiltinSkillAssetStore(
     }
 
     private fun copyAssetRecursively(assetManager: AssetManager, assetPath: String, target: File) {
-        val children = assetManager.list(assetPath).orEmpty()
+        // list 失败按空目录处理，落到下面的单文件分支再试 open。
+        val children = runCatching { assetManager.list(assetPath).orEmpty() }
+            .getOrDefault(emptyArray())
         if (children.isEmpty()) {
             target.parentFile?.mkdirs()
-            assetManager.open(assetPath).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+            try {
+                assetManager.open(assetPath).use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+            } catch (error: IOException) {
+                // 单个 asset 打不开（部分环境对非 ASCII 文件名的 asset 有兼容差异）只跳过该文件，
+                // 不让 199 个内置技能的整体安装链路失败；缺失文件由索引层按缺文件处理。
+                Log.w("SkillRuntime", "skip unreadable builtin asset: $assetPath", error)
             }
             return
         }
@@ -511,7 +521,7 @@ class SkillIndexService(
         val parsed = SkillParser.parseSkillFile(skillFile) ?: return null
         val frontmatter = parsed.frontmatter
         val id = SkillParser.sanitizeSkillId(canonicalDir.name, frontmatter["name"])
-        val metadata = frontmatter["metadata"]?.let { SkillParser.parseIndentedBlock(it) } ?: emptyMap()
+        val metadata = frontmatter["metadata"]?.let { SkillParser.parseIndentedBlock(it) ?: emptyMap() } ?: emptyMap()
         val registryState = registry[id]
         val builtinAsset = builtinAssets[id]
         return SkillIndexEntry(
@@ -530,8 +540,44 @@ class SkillIndexService(
             source = registryState?.source?.ifBlank { null }
                 ?: if (builtinAsset != null) BUILTIN_SOURCE else USER_SOURCE,
             installed = true,
+            // 触发词 = `triggers` + `aliases`（同义/英文/别名），合并去重；
+            // 扩展名与权重为可选增强字段，缺省不影响既有技能。
+            triggers = (parseTriggers(frontmatter["triggers"]) + parseTriggers(frontmatter["aliases"]))
+                .distinct(),
+            extensions = parseExtensions(frontmatter["ext"]),
+            triggerWeight = parseTriggerWeight(frontmatter["trigger_weight"]),
         )
     }
+
+    /**
+     * 解析 frontmatter `triggers` 字段——逗号分隔的关键词列表。
+     * 兼容多行缩进块（每行一个关键词）与单行逗号分隔两种写法。
+     */
+    private fun parseTriggers(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return raw.split('\n', ',')
+            .map { it.trim().trim('-').trim() }
+            .filter { it.isNotBlank() && it.lowercase() != "null" }
+            .distinct()
+            .take(40)
+    }
+
+    /**
+     * 解析 frontmatter `ext` 字段——扩展名触发信号（逗号/换行分隔）。
+     * 允许写成 `.apk` / `apk` / `*.apk`，统一归一化为小写、不含点与通配符。
+     */
+    private fun parseExtensions(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return raw.split('\n', ',')
+            .map { it.trim().trim('-').trim().removePrefix("*").removePrefix(".").lowercase() }
+            .filter { it.isNotBlank() && it.all { c -> c.isLetterOrDigit() } }
+            .distinct()
+            .take(30)
+    }
+
+    /** 解析 frontmatter `trigger_weight`——命中得分乘数，限定 [0.1, 10.0]，缺省 1.0。 */
+    private fun parseTriggerWeight(raw: String?): Double =
+        raw?.trim()?.toDoubleOrNull()?.coerceIn(0.1, 10.0) ?: 1.0
 
     private fun buildBuiltinPlaceholder(
         builtin: BuiltinSkillAsset,

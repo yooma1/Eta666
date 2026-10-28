@@ -39,11 +39,42 @@ internal data class AgentChatUiState(
     val hasEarlierMessages: Boolean = false,
     val conversationCharacterName: String? = null,
     val conversationCharacterAvatarPath: String? = null,
+    /** 当前会话的持续目标；null 表示没有开启目标模式。 */
+    val goal: String? = null,
+    /** 目标模式被用户暂停：run 挂在下一个检查点，等继续。 */
+    val goalPaused: Boolean = false,
+    /** 子任务清单进度；null 表示还没有拆解过。 */
+    val taskProgress: TaskProgressUi? = null,
+    /** 完整清单，供目标详情展开；空表示没拆过。 */
+    val taskItems: List<TaskItemUi> = emptyList(),
+    /** 目标已经收工：不再注入、不再续跑，等用户重新设定或清除。 */
+    val goalCompleted: Boolean = false,
 ) {
     val canCompactContext: Boolean get() = !isStreaming && messageEdit == null && history.any {
         !it.contextSummary && (it.role == "assistant" || it.role == "tool")
     }
 }
+
+
+/** 目标拆解进度：界面只需要这两个数，完整清单在会话文件里。 */
+@Immutable
+data class TaskProgressUi(
+    val done: Int,
+    val total: Int,
+) {
+    val label: String get() = "$done/$total"
+
+    val allDone: Boolean get() = total > 0 && done >= total
+}
+
+/** 清单里的一条，只给界面渲染用。 */
+@Immutable
+internal data class TaskItemUi(
+    val id: String,
+    val title: String,
+    val status: io.github.mangi.eta.data.repository.AgentTaskStatus,
+    val note: String = "",
+)
 
 @Immutable
 sealed interface AgentChatMessageUi {
@@ -178,8 +209,19 @@ data class SuggestionChipsMessageUi(
 data class PendingImageUi(
     val id: String,
     val uri: String,
+    /** 发给模型的预览（512 长边），也是缩略图数据源。 */
     val dataUrl: String,
     val mimeType: String,
+    /**
+     * 看图器与历史消息用的展示副本（1600 长边 / q88）。
+     *
+     * 为什么不直接拿 [uri]（原图）：4000×3000 原图解出来是 48MB ARGB 位图，多开几张就 OOM；
+     * 也不能复用 [dataUrl]：512 长边铺到全屏就是糊的，那正是「点开大图还是模糊」的原因。
+     *
+     * 放在末尾并默认回落到 [dataUrl]：这是新增字段，旧调用点（含单测）不必逐个改，
+     * 但凡是没显式给的地方，看图器就退化成预览档——所以真正生产路径必须显式传。
+     */
+    val displayUrl: String = dataUrl,
 )
 
 @Immutable

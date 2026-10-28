@@ -73,6 +73,23 @@ class AgentRunRecoveryCoordinatorTest {
     }
 
     @Test
+    fun unknownRuntimeStateInterruptsCheckpointWhenNothingRunsLocally() {
+        // 冷启动查不到 Runtime 状态时，本地也没有在跑的 run：遗留 checkpoint 必然是被中断的。
+        val plan = AgentRunRecoveryCoordinator.plan(
+            checkpoints = listOf(checkpoint("run-stale"), checkpoint("run-local")),
+            completedRuns = emptyList(),
+            activeStateKnown = false,
+            terminalStateKnown = false,
+            activeRunIds = emptySet(),
+            locallyObservedRunIds = setOf("run-local"),
+            treatUnknownAsInterrupted = true,
+        )
+
+        assertEquals(listOf("run-stale"), plan.interrupted.map { it.runId })
+        assertTrue(plan.reattach.isEmpty())
+    }
+
+    @Test
     fun knownActiveRunCanReattachEvenWhenTerminalQueryFailed() {
         val plan = AgentRunRecoveryCoordinator.plan(
             checkpoints = listOf(checkpoint("run-active"), checkpoint("run-unknown")),

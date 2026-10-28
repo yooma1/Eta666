@@ -7,17 +7,31 @@ import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentConversationToolCatalog
 import io.github.mangi.eta.agent.tool.ConversationHistoryTool
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.agent.model.AgentModelCapabilityProbe
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentModelRefusal
 import io.github.mangi.eta.agent.model.AgentModelExecutionException
 import io.github.mangi.eta.agent.model.AgentModelFailure
+import io.github.mangi.eta.agent.model.GoalProgress
 import io.github.mangi.eta.agent.model.AgentHttpClient
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
 import io.github.mangi.eta.agent.memory.AgentMemoryContextBuilder
 import io.github.mangi.eta.agent.memory.ConversationMemoryPins
+import io.github.mangi.eta.agent.memory.AgentExperienceTrace
+import io.github.mangi.eta.agent.memory.AgentRetainExtractor
+import io.github.mangi.eta.agent.memory.AgentRetainedRecall
+import io.github.mangi.eta.agent.memory.AgentGraphMemoryRecall
+import io.github.mangi.eta.agent.memory.AgentChatMemoryCandidates
+import io.github.mangi.eta.agent.memory.AgentChatMemoryReranker
+import io.github.mangi.eta.agent.memory.AgentMemoryRetrievalHealthStore
+import io.github.mangi.eta.agent.memory.AgentMemoryRetrievalReport
+import io.github.mangi.eta.agent.memory.AgentRetainPrivacy
+import io.github.mangi.eta.agent.memory.AgentMemoryRelationClassifier
+import io.github.mangi.eta.agent.memory.AgentSemanticMemorySearch
+import io.github.mangi.eta.agent.memory.EtaEmbeddingEndpoint
+import io.github.mangi.eta.agent.memory.EtaMemoryVectorIndex
 import io.github.mangi.eta.agent.roleplay.CharacterMemoryTools
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
-import io.github.mangi.eta.agent.subagent.AgentSubagentToolCatalog
-import io.github.mangi.eta.agent.subagent.SubagentExecutor
 import io.github.mangi.eta.agent.mcp.McpRunSnapshot
 import io.github.mangi.eta.agent.mcp.McpToolExecutor
 import io.github.mangi.eta.agent.mcp.RoutingToolExecutor
@@ -25,8 +39,22 @@ import io.github.mangi.eta.agent.overlay.AgentOverlayVisibilityPolicy
 import io.github.mangi.eta.agent.skill.SkillCompatibilityChecker
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.skill.SkillRuntime
+import io.github.mangi.eta.agent.skill.SkillTriggerMatcher
 import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
+import io.github.mangi.eta.agent.skill.ProjectSpecDetector
+import io.github.mangi.eta.agent.skill.ResolvedSkillContext
+import io.github.mangi.eta.agent.skill.ReverseSignalRouter
+import io.github.mangi.eta.agent.skill.ReverseSkillCatalog
+import io.github.mangi.eta.agent.skill.SkillIndexEntry
+import io.github.mangi.eta.agent.skill.SkillTriggerSignals
+import io.github.mangi.eta.agent.skill.SkillUsageStats
 import io.github.mangi.eta.agent.tool.AgentLocalTools
+import io.github.mangi.eta.agent.subagent.AgentSubagentToolCatalog
+import io.github.mangi.eta.agent.subagent.SubagentExecutor
+import io.github.mangi.eta.agent.tool.AgentTaskTool
+import io.github.mangi.eta.agent.tool.ScreenBusyException
+import io.github.mangi.eta.agent.tool.ScreenLease
+import io.github.mangi.eta.agent.tool.ScreenToolPolicy
 import io.github.mangi.eta.agent.tool.AgentToolRequirements
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import io.github.mangi.eta.agent.tool.PendingSkillConflictCapabilityParser
@@ -34,9 +62,26 @@ import io.github.mangi.eta.agent.tool.ToolExecutionDecision
 import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.data.repository.AgentGoalRepository
+import io.github.mangi.eta.data.repository.AgentExperienceRepository
+import io.github.mangi.eta.data.repository.AgentKnowledgeRepository
+import io.github.mangi.eta.data.repository.AgentRetainedMemoryRepository
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
+import io.github.mangi.eta.data.repository.AgentTaskPlanStore
+import io.github.mangi.eta.data.repository.AgentUserPromptRepository
+import io.github.mangi.eta.data.repository.AgentUserPromptSnapshot
+import io.github.mangi.eta.data.repository.ModelRepository
+import io.github.mangi.eta.data.repository.ProviderRepository
+import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -86,6 +131,7 @@ internal class AgentRuntimeRunExecutor(
 
         // 失败清理需要在 try 外拿到会话 id。
         var memoryConversationId: String? = null
+        val experienceTrace = AgentExperienceTrace()
         val result = try {
             val contextWindow = request.config.knownContextWindow
             checkpointRecorder = AgentRunCheckpointRecorder.create(appContext, request)
@@ -104,11 +150,138 @@ internal class AgentRuntimeRunExecutor(
                 cacheRoot = appContext.cacheDir,
                 baseClient = AgentHttpClient.client,
             )
+            val compatibleSkills = skillIndexService.listInstalledSkills()
+                .filter { SkillCompatibilityChecker.evaluate(it).available }
+            // 逆向总开关：持久化状态，不再从"逆向技能是否全部启用"反推。
+            // 反推在逆向集合扩到两百个之后必然失败（差一个就 false），
+            // 表现就是开关打开后预读与破甲记忆都不生效。
+            val reverseModeEnabled = if (request.operation == AgentRuntimeWire.OP_REWRITE_REPLY) {
+                false
+            } else {
+                runCatching { runBlocking { SettingsDataStore.reverseBundleEnabled() } }
+                    .onFailure { throwable ->
+                        AndroidAgentLogger.warnThrottled("reverse_bundle_state_failed") {
+                            "Reverse bundle state read failed: type=${throwable.safeLogType()}"
+                        }
+                    }
+                    .getOrDefault(false)
+            }
+            // 逆向技能 = 全部技能 − eta 原生三个，按当前索引实时算。
+            val reverseSkillIds = ReverseSkillCatalog.reverseIdsOf(
+                skillIndexService.listSkillsForManagement().map { it.id },
+            )
+            // 关键词触发：用户消息命中 SKILL.md triggers 时自动加载正文（改写回复等非任务操作不触发）。
+            // 增强：信号从「单条消息」扩为「本轮消息 + 最近若干轮对话尾」；一并启用扩展名强命中
+            // （frontmatter `ext`）、IDF 泛词降权、逆向模式偏置、同族去冗余与本地使用反馈加权；
+            // 低置信命中不下发正文、改给候选短名单；零关键词命中时按扩展名/工具名走兜底路由。
+            val triggerText = if (request.operation == AgentRuntimeWire.OP_REWRITE_REPLY) {
+                ""
+            } else {
+                SkillTriggerSignals.buildText(request.prompt, request.history)
+            }
+            // 使用反馈：给本地统计里确实被 skills_read 读过的技能温和加权（失败静默）。
+            val usageStats = runCatching { SkillUsageStats.load(appContext.filesDir) }
+                .getOrDefault(emptyMap())
+            // 负样本：自动注入多次但从未被实际读取的技能温和降权（触发可能不准）。
+            val autoLoads = runCatching { SkillUsageStats.loadAutoLoads(appContext.filesDir) }
+                .getOrDefault(emptyMap())
+            val rankedSkills = if (usageStats.isEmpty() && autoLoads.isEmpty()) {
+                compatibleSkills
+            } else {
+                compatibleSkills.map { entry ->
+                    val reads = usageStats[entry.id] ?: 0
+                    val boost = SkillUsageStats.boost(reads) *
+                        SkillUsageStats.dampen(autoLoads[entry.id] ?: 0, reads)
+                    if (boost == 1.0) entry
+                    else entry.copy(triggerWeight = entry.triggerWeight * boost)
+                }
+            }
+            val autoLoadedSkills: List<ResolvedSkillContext>
+            val rankedCandidates: List<SkillIndexEntry>
+            if (triggerText.isBlank()) {
+                autoLoadedSkills = emptyList()
+                rankedCandidates = emptyList()
+            } else {
+                val triggerInput = SkillTriggerMatcher.Input(
+                    text = triggerText,
+                    extensions = SkillTriggerMatcher.detectExtensions(triggerText),
+                )
+                // 逆向模式放宽覆盖面：技能多、触发词切分细，4 个正文经常不够用。
+                val autoLoadLimit = if (reverseModeEnabled) {
+                    SkillTriggerMatcher.REVERSE_MAX_AUTO_LOADED
+                } else {
+                    SkillTriggerMatcher.MAX_AUTO_LOADED
+                }
+                val candidateLimit = if (reverseModeEnabled) {
+                    SkillTriggerMatcher.REVERSE_MAX_CANDIDATES
+                } else {
+                    SkillTriggerMatcher.MAX_CANDIDATES
+                }
+                val ranked = SkillTriggerMatcher.rankScored(
+                    input = triggerInput,
+                    skills = rankedSkills,
+                    maxResults = candidateLimit + autoLoadLimit,
+                    reverseSkillIds = reverseSkillIds,
+                    reverseBias = reverseModeEnabled,
+                    // 中文汉字重合召回噪声大，只在逆向模式下开。
+                    chineseRecall = reverseModeEnabled,
+                )
+                // 阈值：只对足够特异的命中自动下发正文（<2.0 视为低置信），避免注入错技能。
+                val strongBodies = SkillTriggerMatcher.selectBodies(
+                    ranked.filter { it.specificity >= 2.0 },
+                    autoLoadLimit,
+                )
+                // 结构化兜底路由（扩展名/工具名）——补足关键词命中不到的口。
+                val bySignal = ReverseSignalRouter.route(
+                    text = triggerText,
+                    skills = compatibleSkills,
+                    maxMatches = autoLoadLimit,
+                )
+                // 正文自动注入只保留原版三个技能：其余技能动辄几千字，按关键词猜着塞进上下文
+                // 既不准又贵。非原版技能改由模型按需 skills_read（后续会并入知识库/经验库）。
+                val selected = (strongBodies + bySignal)
+                    .distinctBy { it.id }
+                    .filter { it.id in ReverseSkillCatalog.NATIVE_SKILL_IDS }
+                    .take(autoLoadLimit)
+                // 记录自动注入，作为负样本素材（自动注入但未被读取的技能将被温和降权）。
+                runCatching { selected.forEach { SkillUsageStats.recordAutoLoad(appContext.filesDir, it.id) } }
+                autoLoadedSkills = selected.mapNotNull { entry ->
+                    runCatching { skillLoader.load(entry, "trigger-keyword") }
+                        .onFailure { throwable ->
+                            AndroidAgentLogger.warnThrottled("skill_trigger_load_failed") {
+                                "Auto-load failed for skill ${entry.id}: type=${throwable.safeLogType()}"
+                            }
+                        }
+                        .getOrNull()
+                }
+                // 候选短名单已停用：它同样是关键词猜测，模型需要时自己 skills_read 更准。
+                rankedCandidates = emptyList()
+            }
+            // Trellis 项目规范探测（方案 A）：从用户消息中的路径向上找 .trellis/spec/，
+            // 命中则注入规范索引；失败静默降级，不影响正常对话。
+            val projectSpecs = if (request.operation == AgentRuntimeWire.OP_REWRITE_REPLY) {
+                null
+            } else {
+                runCatching { ProjectSpecDetector.detect(request.prompt) }
+                    .onFailure { throwable ->
+                        AndroidAgentLogger.warnThrottled("trellis_spec_detect_failed") {
+                            "Trellis spec detection failed: type=${throwable.safeLogType()}"
+                        }
+                    }
+                    .getOrNull()
+            }
             val skillContext = SkillContext(
-                installedSkills = skillIndexService.listInstalledSkills()
-                    .filter { SkillCompatibilityChecker.evaluate(it).available },
+                installedSkills = compatibleSkills,
+                autoLoadedSkills = autoLoadedSkills,
+                rankedCandidates = rankedCandidates,
+                projectSpecs = projectSpecs,
+                // 逆向总开关（融合 dsh-infinite-gen-4）：一个开关统管技能启停、协议注入与预读偏置。
+                reverseModeEnabled = reverseModeEnabled,
+                reverseSkillIds = reverseSkillIds,
             )
             val memoryEnabled = runBlocking { AgentMemoryRepository.isEnabled() }
+            val experienceEnabled = memoryEnabled &&
+                runBlocking { SettingsDataStore.autoExperienceEnabled() }
             val uiPayload = request.handoff
                 ?.takeIf { it.source == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE }
                 ?.let { AgentUiHandoffPayload.from(it.payload) }
@@ -147,8 +320,42 @@ internal class AgentRuntimeRunExecutor(
             } else {
                 AgentMemoryContext.DISABLED
             }
-            if (request.config.terminalTools) {
-                // 启动探测由 App 拥有；模型首轮等待其结果，避免把检测中的授权当成普通设备。
+            // 已完成的目标不再注入：否则用户下次随便说句话，又会被从头推进同一个旧目标。
+            val goalCompleted = runCatching {
+                conversationId != null && AgentGoalRepository.isCompleted(conversationId)
+            }.getOrDefault(false)
+            // 用户自备作战协议（filesDir/prompts/ 下第一个非空 .md）。
+            // 会话开始时读取一次并冻结：中途改文件只影响下个会话，避免系统提示抖动废掉请求前缀缓存。
+            // 作战协议与逆向能力共用唯一的持久化总开关，避免旧版三个开关状态分叉。
+            val userPrompt = runBlocking {
+                runCatching {
+                    AgentUserPromptRepository.loadFor(
+                        enabled = AgentUserPromptRepository.enabled(),
+                    )
+                }.getOrElse { throwable ->
+                    AndroidAgentLogger.warnThrottled("agent_user_prompt_unavailable") {
+                        "User prompt unavailable: type=${throwable.safeLogType()}"
+                    }
+                    AgentUserPromptSnapshot.EMPTY
+                }
+            }
+            // 红队模式：整份协议随包，开启时读一次（会话内冻结，避免系统提示抖动废掉前缀缓存）。
+            val redteamProtocol = runBlocking {
+                runCatching {
+                    if (!SettingsDataStore.redteamMode()) {
+                        ""
+                    } else {
+                        appContext.assets.open("user_protocol/redteam-mode.md")
+                            .bufferedReader().use { it.readText() }
+                    }
+                }.getOrElse { throwable ->
+                    AndroidAgentLogger.warnThrottled("redteam_mode_unavailable") {
+                        "Redteam mode asset unavailable: type=${throwable.safeLogType()}"
+                    }
+                    ""
+                }
+            }
+            if (request.config.terminalTools) {                // 启动探测由 App 拥有；模型首轮等待其结果，避免把检测中的授权当成普通设备。
                 runBlocking {
                     while (io.github.mangi.eta.agent.device.RootAccess.state.value.isChecking) {
                         runController.throwIfCancelled()
@@ -256,6 +463,12 @@ internal class AgentRuntimeRunExecutor(
                     journal + session.transcript
                 }
             }
+            val taskStore = conversationId?.let { AgentTaskPlanStore(appContext.filesDir) }
+            val taskTool = if (taskStore != null && conversationId != null) {
+                AgentTaskTool(taskStore, conversationId)
+            } else {
+                null
+            }
             val subagentAllowed = {
                 request.config.subagentTools && currentPermissions().subagentTools
             }
@@ -288,9 +501,16 @@ internal class AgentRuntimeRunExecutor(
                 if (subagentAllowed()) AgentSubagentToolCatalog.appendSchemas(tools)
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
                 if (characterMemoryTools != null && memoryEnabled) CharacterMemoryTools.appendSchemas(tools)
+                if (taskTool != null) tools.put(taskTool.schema())
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
-                if (call.name in AgentSubagentToolCatalog.names) {
+                if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
+                    historyTool.execute(call)
+                } else if (call.name in CharacterMemoryTools.NAMES && characterMemoryTools != null) {
+                    characterMemoryTools.execute(call)
+                } else if (call.name == AgentTaskTool.TASK_WRITE && taskTool != null) {
+                    taskTool.execute(call)
+                } else if (call.name in AgentSubagentToolCatalog.names) {
                     if (!subagentAllowed()) {
                         AgentModelClient.ToolResult(
                             JSONObject()
@@ -304,58 +524,314 @@ internal class AgentRuntimeRunExecutor(
                     } else {
                         subagentExecutor.execute(call.round, call)
                     }
-                } else if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
-                    historyTool.execute(call)
-                } else if (call.name in CharacterMemoryTools.NAMES && characterMemoryTools != null) {
-                    characterMemoryTools.execute(call)
-                } else routingExecutor.execute(call).also { result ->
-                    if (call.name == "memory_write") {
-                        runCatching { JSONObject(result.content) }.getOrNull()
-                            ?.takeIf { it.optBoolean("ok") }
-                            ?.let { ConversationMemoryPins.recordOwnWrite(conversationId, it.optString("revision")) }
+                } else {
+                    val invoke = {
+                        routingExecutor.execute(call).also { result ->
+                            if (experienceEnabled) {
+                                experienceTrace.observe(call.name, result.content)
+                            }
+                            if (call.name == "memory_write") {
+                                runCatching { JSONObject(result.content) }.getOrNull()
+                                    ?.takeIf { it.optBoolean("ok") }
+                                    ?.let { ConversationMemoryPins.recordOwnWrite(conversationId, it.optString("revision")) }
+                            }
+                        }
+                    }
+                    // 屏幕是进程级独占资源：两个 agent 交替 observe/tap 会让彼此的观察互相作废。
+                    if (ScreenToolPolicy.isScreenTool(call.name)) {
+                        runCatching { ScreenLease.withLease(request.runId) { invoke() } }
+                            .getOrElse { throwable ->
+                                if (throwable is ScreenBusyException) {
+                                    errorToolResult(
+                                        "SCREEN_BUSY",
+                                        "屏幕正被另一个 agent（${throwable.holder}）使用；先做不需要看屏幕的步骤，稍后重试。",
+                                    )
+                                } else {
+                                    throw throwable
+                                }
+                            }
+                    } else {
+                        invoke()
                     }
                 }
             }
-            val completedResponse = AgentModelClient.complete(
-                config = request.config,
-                sessionId = request.effectiveModelSessionId,
-                operationId = request.runId,
-                initialUserMessageId = uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}",
-                initialSupplementIndex = uiPayload?.lastSupplementIndex ?: 0,
-                roleplayContext = roleplayContext,
-                rewriteReply = request.operation == AgentRuntimeWire.OP_REWRITE_REPLY,
-                compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
-                onContextSnapshot = { snapshot ->
-                    // 压缩会把历史里的记忆写入摘要掉，下一轮需要重新注入最新记忆。
-                    ConversationMemoryPins.forget(conversationId)
-                    val committed = snapshot.copy(operationId = request.runId)
-                    AgentRunCheckpointStore.saveContext(appContext, request.runId, committed)
-                    session.updateContext(committed)
-                },
-                onTranscript = { transcript ->
-                    AgentRunCheckpointStore.saveTranscript(appContext, request.runId, transcript)
-                    session.updateTranscript(transcript)
-                },
-                capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
-                prompt = request.prompt,
-                assistantScreenContext = request.assistantScreenContext,
-                toolExecutor = runToolExecutor,
-                images = request.images,
-                history = request.history,
-                runController = runController,
-                skillContext = skillContext,
-                memoryContext = memoryContext,
-                additionalTools = runTools,
-                executionContext = executor.terminalExecutionContext,
-            ) { event ->
-                timing.accept(event)
+            var previousMemoryHint: String? = null
+            var memoryHintPrepared = false
+            fun prepareMemoryHint(modelConfig: AgentModelClient.ModelConfig): String? {
+                if (memoryHintPrepared) return previousMemoryHint
+                memoryHintPrepared = true
+                if (!memoryEnabled || roleplayContext != null ||
+                    request.operation != AgentRuntimeWire.OP_CHAT
+                ) return null
+                val diagnostics = AgentMemoryRetrievalHealthStore(appContext.filesDir)
+                val hints = buildString {
+                    if (experienceEnabled) {
+                        runCatching { AgentExperienceRepository.recall(request.prompt) }
+                            .getOrNull()?.let { appendLine(it) }
+                    }
+                    val coreText = runCatching { AgentMemoryRepository.snapshot().content }.getOrDefault("")
+                    val notes = runCatching { AgentKnowledgeRepository.snapshot() }.getOrDefault(emptyList())
+                    val records = runCatching { AgentRetainedMemoryRepository.active(400) }.getOrDefault(emptyList())
+                    val coreCount = AgentChatMemoryCandidates.coreChunks(coreText).size
+                    val semanticEnabled = runBlocking { SettingsDataStore.semanticMemoryEnabled() }
+                    val embeddingEnabled = runBlocking { SettingsDataStore.semanticMemoryUseEmbeddings() }
+                    var candidateCount = 0
+                    var hitCount = 0
+                    var mode = if (semanticEnabled) "fallback" else "disabled"
+                    var detail = ""
+                    var selectedGraphSeeds = emptyList<Pair<String, Double>>()
+
+                    if (semanticEnabled && AgentRetainPrivacy.allow(request.prompt)) {
+                        val candidates = AgentChatMemoryCandidates.select(
+                            request.prompt, coreText, notes, records,
+                        )
+                        candidateCount = candidates.size
+                        if (candidates.isNotEmpty()) {
+                            val selection = runCatching {
+                                AgentChatMemoryReranker().rerank(
+                                    request.prompt, candidates, modelConfig, runController,
+                                )
+                            }.onFailure { error ->
+                                AndroidAgentLogger.warnThrottled("chat_semantic_memory_fallback") {
+                                    "Chat semantic memory ranking unavailable: type=${error.safeLogType()}"
+                                }
+                            }.getOrNull()
+                            if (selection == null) {
+                                mode = "fallback"
+                                detail = "模型未返回有效语义排序"
+                                val backup = candidates.take(4)
+                                if (backup.isNotEmpty()) {
+                                    appendLine("本地检索参考（词法匹配或分布式片段，未经模型验证）：")
+                                    backup.forEach { item ->
+                                        appendLine("- [${item.source} / ${item.title.take(50)}] ${item.text.take(340)}")
+                                    }
+                                }
+                            } else {
+                                mode = "chat"
+                                hitCount = selection.selected.size
+                                selectedGraphSeeds = selection.semanticNodes
+                                selection.context()?.let { appendLine(it) }
+                                detail = if (records.isEmpty()) "结构化记忆为空，已检索 MEMORY.md 和知识库"
+                                    else "已检索结构化记忆、MEMORY.md 与知识库"
+                            }
+                        } else {
+                            mode = "none"
+                            detail = "MEMORY.md、知识库和结构化记忆中无可检索内容"
+                        }
+                    } else if (semanticEnabled) {
+                        mode = "fallback"
+                        detail = "包含敏感模式的查询已跳过额外模型检索"
+                    }
+
+                    if (embeddingEnabled && semanticEnabled && records.isNotEmpty()) {
+                        val embedded = runCatching {
+                            val endpoint = EtaEmbeddingEndpoint.fromConfig(
+                                modelConfig, runBlocking { SettingsDataStore.semanticMemoryModel() },
+                            )
+                            AgentSemanticMemorySearch(EtaMemoryVectorIndex(appContext.filesDir))
+                                .search(request.prompt, records, endpoint, runController).ranked
+                        }.onFailure { error ->
+                            AndroidAgentLogger.warnThrottled("embedding_memory_fallback") {
+                                "Embedding model unavailable; chat reranker remains active: type=${error.safeLogType()}"
+                            }
+                            detail += "；向量服务不可用，已保留聊天模型检索"
+                        }.getOrDefault(emptyList())
+                        if (embedded.isNotEmpty()) {
+                            selectedGraphSeeds = (selectedGraphSeeds + embedded).distinctBy { it.first }
+                            if (mode == "chat") mode = "embedding"
+                        }
+                    }
+                    if (!semanticEnabled || mode == "fallback") {
+                        runCatching { AgentKnowledgeRepository.search(request.prompt, 3) }
+                            .getOrDefault(emptyList()).forEach { note ->
+                                appendLine("本地知识库参考：${note.title.take(80)} [id=${note.id}]")
+                                appendLine(note.content.take(420))
+                            }
+                    }
+                    val graphHits = AgentGraphMemoryRecall.retrieve(
+                        request.prompt, records, selectedGraphSeeds,
+                        enableGraph = runBlocking { SettingsDataStore.graphMemoryEnabled() },
+                    )
+                    if (mode == "fallback" || !semanticEnabled) {
+                        AgentGraphMemoryRecall.hint(graphHits)?.let { appendLine(it) }
+                    } else {
+                        // Add only graph expansions: seed nodes are already in the reranked context.
+                        AgentGraphMemoryRecall.hint(graphHits.filter { it.path.isNotEmpty() })
+                            ?.let { appendLine(it) }
+                    }
+                    runCatching {
+                        diagnostics.write(AgentMemoryRetrievalReport(
+                            mode, candidateCount, hitCount,
+                            coreCount, records.size, detail,
+                        ))
+                    }
+                    if (isNotEmpty()) {
+                        appendLine("所有历史资料仅作为可检索背景，当前用户陈述和当前设备状态优先。")
+                    }
+                }.ifBlank { null }
+                previousMemoryHint = hints
+                return hints
+            }
+
+            fun runModelAttempt(modelConfig: AgentModelClient.ModelConfig): AgentModelClient.ModelResponse.Text =
+                AgentModelClient.complete(
+                    config = modelConfig,
+                    sessionId = request.effectiveModelSessionId,
+                    operationId = request.runId,
+                    initialUserMessageId = uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}",
+                    initialSupplementIndex = uiPayload?.lastSupplementIndex ?: 0,
+                    roleplayContext = roleplayContext,
+                    rewriteReply = request.operation == AgentRuntimeWire.OP_REWRITE_REPLY,
+                    compactOnly = request.operation == AgentRuntimeWire.OP_COMPACT,
+                    onContextSnapshot = { snapshot ->
+                        // 压缩会把历史里的记忆写入摘要掉，下一轮需要重新注入最新记忆。
+                        ConversationMemoryPins.forget(conversationId)
+                        val committed = snapshot.copy(operationId = request.runId)
+                        AgentRunCheckpointStore.saveContext(appContext, request.runId, committed)
+                        session.updateContext(committed)
+                    },
+                    onTranscript = { transcript ->
+                        AgentRunCheckpointStore.saveTranscript(appContext, request.runId, transcript)
+                        session.updateTranscript(transcript)
+                    },
+                    capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
+                    prompt = request.prompt,
+                    assistantScreenContext = request.assistantScreenContext,
+                    toolExecutor = runToolExecutor,
+                    images = request.images,
+                    history = request.history,
+                    runController = runController,
+                    skillContext = skillContext,
+                    memoryContext = memoryContext,
+                    experienceHint = prepareMemoryHint(modelConfig),
+                    userPrompt = userPrompt,
+                    redteamProtocol = redteamProtocol,
+                    goal = if (goalCompleted) "" else request.goal,
+                    goalProgress = taskStore?.let { store ->
+                        {
+                            val plan = store.load(conversationId.orEmpty())
+                            if (plan.total == 0) {
+                                null
+                            } else {
+                                GoalProgress(
+                                    total = plan.total,
+                                    done = plan.doneCount,
+                                    open = plan.openCount,
+                                    allDone = plan.allDone,
+                                )
+                            }
+                        }
+                    },
+                    // 清单跟着工具结果再注入一次，但只在它真的变了时注入：
+                    // 每轮无脑重发会把上下文泡满，反而挤掉工作空间。
+                    taskPlanHint = taskStore?.let { store ->
+                        var lastSignature = ""
+                        {
+                            val plan = store.load(conversationId.orEmpty())
+                            val signature = plan.tasks.joinToString { "${it.id}:${it.status.name}" }
+                            if (plan.total == 0 || signature == lastSignature) {
+                                null
+                            } else {
+                                lastSignature = signature
+                                "当前任务清单（用 ${AgentTaskTool.TASK_WRITE} 更新）：\n" + plan.summary()
+                            }
+                        }
+                    },
+                    additionalTools = runTools,
+                    executionContext = executor.terminalExecutionContext,
+                ) { event ->
+                    timing.accept(event)
+                    acceptEvent(
+                        session,
+                        event,
+                        archivedEvents,
+                        entrySurfaceGuard,
+                        checkpointRecorder,
+                    )
+                }
+
+            val completedResponse = withRefusalRetry(request, onRetry = { retryAttempt ->
                 acceptEvent(
                     session,
-                    event,
+                    AgentEvent.ModelRetryScheduled(
+                        round = 1,
+                        attempt = retryAttempt,
+                        maxAttempts = REFUSAL_RETRY_MAX_ATTEMPTS + 1,
+                        delayMs = 0,
+                        reasonCode = "MODEL_REFUSAL_RETRY",
+                    ),
                     archivedEvents,
                     entrySurfaceGuard,
                     checkpointRecorder,
                 )
+            }) { modelConfig ->
+                runModelAttempt(modelConfig)
+            }
+            if (experienceEnabled && roleplayContext == null &&
+                request.operation == AgentRuntimeWire.OP_CHAT &&
+                runBlocking { SettingsDataStore.autoExperienceEnabled() } &&
+                runBlocking { AgentMemoryRepository.isEnabled() }
+            ) {
+                runCatching {
+                    AgentExperienceRepository.record(
+                        request.prompt, experienceTrace.snapshot(), completed = true,
+                    )
+                }.onFailure {
+                    AndroidAgentLogger.warnThrottled("experience_record_failed") {
+                        "Task experience capture unavailable: type=${it.safeLogType()}"
+                    }
+                }
+            }
+            val retainEnabled = memoryEnabled &&
+                request.operation == AgentRuntimeWire.OP_CHAT && roleplayContext == null &&
+                runBlocking { SettingsDataStore.smartRetainEnabled() } &&
+                runBlocking { AgentMemoryRepository.isEnabled() }
+            if (retainEnabled && !runController.isCancelled) {
+                runCatching {
+                    val existing = AgentRetainedMemoryRepository.active(35)
+                    val extracted = AgentRetainExtractor().extract(
+                        request.config, request.prompt, existing, runController,
+                    )
+                    if (extracted.isNotEmpty() && !runController.isCancelled &&
+                        runBlocking { SettingsDataStore.smartRetainEnabled() } &&
+                        runBlocking { AgentMemoryRepository.isEnabled() }
+                    ) {
+                        val remembered = AgentRetainedMemoryRepository.retain(
+                            extracted, AgentRetainExtractor.sourceHash(request.runId),
+                        )
+                        if (remembered.isNotEmpty() &&
+                            runBlocking { SettingsDataStore.graphMemoryEnabled() }
+                        ) {
+                            runCatching {
+                                val otherRecords = AgentRetainedMemoryRepository.active(400)
+                                    .filterNot { old -> remembered.any { it.id == old.id } }
+                                val links = AgentMemoryRelationClassifier().classify(
+                                    request.config, remembered, otherRecords, runController,
+                                )
+                                links.forEach { (id, edges) ->
+                                    AgentRetainedMemoryRepository.proposeLinks(id, edges)
+                                }
+                            }.onFailure {
+                                AndroidAgentLogger.warnThrottled("memory_relation_classify_failed") {
+                                    "Graph classification skipped: type=${it.safeLogType()}"
+                                }
+                            }
+                        }
+                    }
+                }.onFailure {
+                    AndroidAgentLogger.warnThrottled("smart_retain_failed") {
+                        "Automatic Retain skipped: type=${it.safeLogType()}"
+                    }
+                }
+            }
+            // 清单全绿就把目标标记完成：下一次 run 不再注入、也不续跑它。
+            // 否则用户第二天随便说句话，agent 又会从头推进同一个旧目标——这就是"用着怪"。
+            runCatching {
+                val id = conversationId ?: return@runCatching
+                val plan = taskStore?.load(id) ?: return@runCatching
+                // 至少两条子任务才算真拆解过：只写一条再标完成，等同于没拆就宣布收工，
+                // 以前这种清单会把目标永久标记为完成，之后再也不续跑——用户看到的就是"坏了"。
+                if (plan.allDone && plan.total >= 2) AgentGoalRepository.markCompleted(id)
             }
             response = completedResponse
             AgentRuntimeWire.RunResult(
@@ -382,27 +858,33 @@ internal class AgentRuntimeRunExecutor(
                 AndroidAgentLogger.info("Agent runtime stopped")
             } else {
                 val requestFailure = modelFailure?.cause as? AgentModelFailure
+                if (requestFailure?.code == "CONTEXT_OVERFLOW") {
+                    learnContextWindowFromOverflow(request.config, requestFailure)
+                }
                 AndroidAgentLogger.error(
                     "Agent runtime failed: type=${throwable.safeLogType()}, " +
                         "model_code=${requestFailure?.code.orEmpty()}, " +
                         "cause_type=${requestFailure?.cause?.safeLogType().orEmpty()}"
                 )
-                val event = AgentEvent.RunFailed(message)
-                runCatching {
-                    acceptEvent(
-                        session,
-                        event,
-                        archivedEvents,
-                        entrySurfaceGuard,
-                        checkpointRecorder,
-                    )
-                }.onFailure { checkpointFailure ->
-                    AndroidAgentLogger.error(
-                        "Agent runtime failure checkpoint failed: " +
-                            "type=${checkpointFailure.safeLogType()}"
-                    )
-                    session.emit(event)
-                }
+            }
+            // 停止与失败都要落盘。原来只有失败分支 acceptEvent，被用户按停时这一轮
+            // 已产生的助手消息、工具调用、思考就只留在内存里 —— 表现为"会话记录突然少了内容"。
+            // 上层本来就靠 checkpoint 在 interrupted 时回填（AgentAppState 第 474 行），
+            // 前提是这里真的写了 checkpoint。
+            runCatching {
+                acceptEvent(
+                    session,
+                    AgentEvent.RunFailed(message),
+                    archivedEvents,
+                    entrySurfaceGuard,
+                    checkpointRecorder,
+                )
+            }.onFailure { checkpointFailure ->
+                AndroidAgentLogger.error(
+                    "Agent runtime failure checkpoint failed: " +
+                        "type=${checkpointFailure.safeLogType()}"
+                )
+                session.emit(AgentEvent.RunFailed(message))
             }
             AgentRuntimeWire.RunResult(
                 runId = request.runId,
@@ -410,7 +892,9 @@ internal class AgentRuntimeRunExecutor(
                 content = "",
                 error = message,
                 reasoningContent = modelFailure?.reasoningContent.orEmpty(),
-                transcript = modelFailure?.transcript.orEmpty(),
+                // complete() 调用之前被取消时没有 AgentModelExecutionException 包装，
+                // transcript 会是空的；用 session 已积累的本轮增量兜底，别让 UI 收到空列表。
+                transcript = modelFailure?.transcript ?: session.transcript,
                 contextSnapshot = modelFailure?.contextSnapshot?.copy(operationId = request.runId) ?: session.contextSnapshot,
                 operation = request.operation,
                 rewriteTargetMessageId = request.rewriteTargetMessageId,
@@ -490,4 +974,86 @@ internal class AgentRuntimeRunExecutor(
                 }
             }
     }
+
+    /**
+     * 口头拒绝重试：当前模型拒绝配合（MODEL_REFUSAL）时，**用当前 provider 当前模型**
+     * 原样重发同一请求（不换端），最多 [REFUSAL_RETRY_MAX_ATTEMPTS] 次，仍拒绝才把失败
+     * 交给上层。仅对话类操作启用；改写/压缩/手动压缩不重试。拒绝内容不入上下文
+     * （Loop 层已保证），因此重试是干净的全量重跑；采样随机性让重试有实际通过率。
+     */
+    private fun withRefusalRetry(
+        request: AgentRuntimeWire.RunRequest,
+        onRetry: (attempt: Int) -> Unit,
+        attempt: (AgentModelClient.ModelConfig) -> AgentModelClient.ModelResponse.Text,
+    ): AgentModelClient.ModelResponse.Text {
+        val modelConfig = request.config
+        var retryAttempt = 0
+        while (true) {
+            try {
+                return attempt(modelConfig)
+            } catch (failure: AgentModelExecutionException) {
+                val cause = failure.cause as? AgentModelFailure
+                if (
+                    cause?.code != AgentModelRefusal.FAILURE_CODE ||
+                    retryAttempt >= REFUSAL_RETRY_MAX_ATTEMPTS ||
+                    request.operation != AgentRuntimeWire.OP_CHAT ||
+                    !Prefs.isEnabled(Prefs.Keys.AGENT_REFUSAL_FAILOVER_ENABLED)
+                ) {
+                    throw failure
+                }
+                retryAttempt++
+                AndroidAgentLogger.warn(
+                    "Agent refusal retry (same provider): attempt=$retryAttempt " +
+                        "provider=${modelConfig.providerId} model=${modelConfig.model}",
+                )
+                onRetry(retryAttempt)
+            }
+        }
+    }
+
+    /**
+     * 超限报错里常带服务商写明的上下文上限——这是**权威**数字，直接学下来写进模型覆盖值，
+     * 下次换回该模型时自动压缩就能按真实上限触发（不必等用户手填或探测）。
+     * 失败静默：学习只是锦上添花，绝不影响本次失败的呈现。
+     */
+    private fun learnContextWindowFromOverflow(
+        config: AgentModelClient.ModelConfig,
+        failure: AgentModelFailure?,
+    ) {
+        val learned = AgentModelCapabilityProbe.parseContextLimit(failure?.message.orEmpty()) ?: return
+        if (config.providerId.isBlank()) return
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            runCatching {
+                withTimeout(LEARN_WINDOW_TIMEOUT_MS) {
+                    val provider = ProviderRepository.providerById(config.providerId) ?: return@withTimeout
+                    val target = provider.models.firstOrNull { it.modelId == config.model }
+                        ?: return@withTimeout
+                    if (target.effectiveContextWindow == learned) return@withTimeout
+                    ModelRepository.saveModel(provider.id, target.copy(contextWindowOverride = learned))
+                    AndroidAgentLogger.info(
+                        "Agent learned context window from provider error: provider=${provider.id} " +
+                            "model=${config.model} window=$learned",
+                    )
+                }
+            }.onFailure { throwable ->
+                AndroidAgentLogger.warn(
+                    "Agent context window learning failed: type=${throwable.safeLogType()}",
+                )
+            }
+        }
+    }
 }
+
+/** 学习窗口的落库超时：宁可不学，也不要拖住失败呈现。 */
+private const val LEARN_WINDOW_TIMEOUT_MS = 10_000L
+
+/** 口头拒绝后用当前 provider 原样重试的次数上限。 */
+private const val REFUSAL_RETRY_MAX_ATTEMPTS = 2
+
+/** 子代理墙钟上限：轮次分档再宽松也得有个终点，防止单个子代理拖住整批。 */
+private const val SUB_AGENT_TIMEOUT_MS = 300_000L
+
+/** 工具层的失败结果：统一 `{ok:false, code, message}`，模型能据此换方案而不是崩掉。 */private fun errorToolResult(code: String, message: String): AgentModelClient.ToolResult =
+    AgentModelClient.ToolResult(
+        JSONObject().put("ok", false).put("code", code).put("message", message).toString(),
+    )

@@ -22,6 +22,9 @@ sealed interface AppRoute : NavKey {
     data object WebToolsSettings : AppRoute
 
     @Serializable
+    data object Subagent : AppRoute
+
+    @Serializable
     data object Skills : AppRoute
 
     @Serializable
@@ -71,6 +74,9 @@ sealed interface AppRoute : NavKey {
 
     @Serializable
     data object Memory : AppRoute
+
+    @Serializable
+    data object UserPrompt : AppRoute
 
     @Serializable
     data object LinuxEnvironment : AppRoute

@@ -8,6 +8,7 @@ import io.github.mangi.eta.data.model.GeminiProviderSetting
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
 import io.github.mangi.eta.data.model.CustomProviderSetting
 import io.github.mangi.eta.data.model.Model
+import io.github.mangi.eta.data.model.ModelContextInference
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
@@ -174,7 +175,7 @@ internal object RuntimeConfigRepository {
         val profile = ProviderConnectionProfile.forAuthMode(provider.authMode)
         val endpointMode = profile?.endpointMode ?: provider.endpointMode()
         val reasoningCapabilities = reasoningCapabilities(provider, model)
-        return AgentModelClient.ModelConfig(
+        val runtime = AgentModelClient.ModelConfig(
             providerId = provider.id,
             providerName = provider.name,
             providerType = profile?.providerType ?: provider.runtimeProviderType,
@@ -185,6 +186,9 @@ internal object RuntimeConfigRepository {
             model = model.modelId.trim(),
             modelDisplayName = model.displayName.trim(),
             contextWindow = model.effectiveContextWindow,
+            // 声明值（目录/服务商元数据）只用于提前触发压缩；仍缺省时按同族兄弟继承，取最小值保守。
+            declaredContextWindow = model.contextWindow?.takeIf { it > 0 }
+                ?: ModelContextInference.infer(provider.models, model),
             autoCompactionEnabled = Prefs.isEnabled(Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED),
             subagentTools = Prefs.isEnabled(Prefs.Keys.AGENT_SUBAGENT_ENABLED),
             systemPrompt = systemPrompt,
@@ -199,6 +203,7 @@ internal object RuntimeConfigRepository {
             customHeaders = provider.customHeaders + model.customHeaders,
             customBody = provider.customBody + model.customBody,
         )
+        return OpenCodeEmbeddedGateway.effectiveModelConfig(provider, runtime)
     }
 
     fun reasoningCapabilities(provider: ProviderSetting, model: Model): ModelReasoningCapabilities? {

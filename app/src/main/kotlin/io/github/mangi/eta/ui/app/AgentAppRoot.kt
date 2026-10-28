@@ -50,12 +50,14 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.SettingsScreen
+import io.github.mangi.eta.ui.screens.subagent.SubagentSettingsScreen
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.model.AgentHomeAction
 import io.github.mangi.eta.ui.model.AgentMemoryAction
 import io.github.mangi.eta.ui.model.AgentSkillsAction
 import io.github.mangi.eta.ui.model.AgentSystemEnhanceAction
 import io.github.mangi.eta.ui.model.AgentToolsAction
+import io.github.mangi.eta.ui.model.AgentUserPromptAction
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
 import io.github.mangi.eta.ui.model.LOCAL_NETWORK_PERMISSION_ITEM_ID
 import io.github.mangi.eta.ui.model.PermissionHealthAction
@@ -80,6 +82,7 @@ import io.github.mangi.eta.ui.screens.mcp.McpServerDetailScreen
 import io.github.mangi.eta.ui.screens.mcp.McpServersScreen
 import io.github.mangi.eta.ui.screens.memory.AgentMemoryScreen
 import io.github.mangi.eta.ui.screens.permissions.PermissionHealthScreen
+import io.github.mangi.eta.ui.screens.prompt.AgentUserPromptScreen
 import io.github.mangi.eta.ui.screens.skills.AgentSkillsScreen
 import io.github.mangi.eta.ui.screens.subagent.SubagentSettingsScreen
 import io.github.mangi.eta.ui.screens.terminal.LinuxEnvironmentScreen
@@ -152,6 +155,7 @@ fun AgentAppRoot(
     }
     val skills = appViewModel.skills
     val memory = appViewModel.memory
+    val userPrompt = appViewModel.userPrompt
     val permissionHealth = appViewModel.permissionHealth
     val toolsState = remember { buildToolsState(context) }
     val characterStore = viewModel<CharacterLibraryViewModel>().store
@@ -166,11 +170,14 @@ fun AgentAppRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                RootAccess.refresh(context)
-                appViewModel.refreshKimiWeb()
-                permissionHealth.refreshPermissionHealth()
-                agentState.refreshRuntimeResults()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    RootAccess.refresh(context)
+                    appViewModel.refreshKimiWeb()
+                    permissionHealth.refreshPermissionHealth()
+                    agentState.refreshRuntimeResults()
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -376,6 +383,9 @@ fun AgentAppRoot(
         ) {
             entry<AppRoute.Home>(swipeDismiss = swipeDismiss) {
                 RoutedShell(route = AppRoute.Home) {
+                    // 目标按会话存储：切换会话后必须重读，否则会把上一个会话的目标显示在新会话上。
+                    LaunchedEffect(agentState.conversationPaneState.selectedConversationId) {
+                    }
                     AgentHomeScreen(
                         state = agentState.homeState,
                         modelPickerState = agentState.modelPickerState,
@@ -486,6 +496,7 @@ fun AgentAppRoot(
                             AgentSkillsAction.CancelZipReplacement -> skills.cancelSkillZipReplacement()
                             AgentSkillsAction.DismissNotice -> skills.dismissSkillNotice()
                             is AgentSkillsAction.ToggleSkill -> skills.toggleSkill(action.skillId, action.enabled)
+                            is AgentSkillsAction.ToggleReverseMode -> skills.toggleReverseMode(action.enabled)
                             is AgentSkillsAction.DeleteSkill -> skills.deleteSkill(action.skillId)
                             is AgentSkillsAction.ReinstallBuiltin -> skills.reinstallBuiltin(action.skillId)
                         }
@@ -575,8 +586,22 @@ fun AgentAppRoot(
                                                 }
                                             }
                                         } else {
+                                            // 直接弹本应用的豁免对话框；部分 ROM 不支持时回落到列表页。
                                             runCatching {
-                                                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                                                context.startActivity(
+                                                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                                        .setData(
+                                                            android.net.Uri.parse(
+                                                                "package:${context.packageName}",
+                                                            ),
+                                                        ),
+                                                )
+                                            }.onFailure {
+                                                runCatching {
+                                                    context.startActivity(
+                                                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -661,7 +686,9 @@ fun AgentAppRoot(
                 SettingsScreen(
                     context = context,
                     onNavigate = { route -> pushRoute(route) },
-                    onBack = ::popRoute
+                    onBack = ::popRoute,
+                    reverseModeEnabled = skills.skillsState.reverseModeEnabled,
+                    onToggleReverseMode = { enabled -> skills.toggleReverseMode(enabled) },
                 )
             }
             entry<AppRoute.SpeechSettings>(swipeDismiss = swipeDismiss) {
@@ -703,10 +730,70 @@ fun AgentAppRoot(
                         when (action) {
                             AgentMemoryAction.NavigateBack -> popRoute()
                             is AgentMemoryAction.ToggleEnabled -> memory.setMemoryEnabled(action.enabled)
+                            is AgentMemoryAction.ToggleAutoExperience -> memory.setAutoExperienceEnabled(action.enabled)
+                            is AgentMemoryAction.ToggleSmartRetain -> memory.setSmartRetainEnabled(action.enabled)
+                            is AgentMemoryAction.ToggleSemanticRecall ->
+                                memory.setSemanticMemoryEnabled(action.enabled)
+                            AgentMemoryAction.TestChatSemanticRetrieval ->
+                                memory.testChatSemanticRetrieval()
+                            is AgentMemoryAction.ToggleEmbeddingAccelerator ->
+                                memory.setEmbeddingAcceleratorEnabled(action.enabled)
+                            AgentMemoryAction.TestEmbeddingProvider -> memory.testEmbeddingProvider()
+                            is AgentMemoryAction.SaveSemanticModel ->
+                                memory.setSemanticMemoryModel(action.model)
+                            AgentMemoryAction.BuildSemanticIndex -> memory.buildSemanticIndex()
+                            is AgentMemoryAction.ToggleGraphRecall ->
+                                memory.setGraphMemoryEnabled(action.enabled)
+                            AgentMemoryAction.ClassifyExistingRelations -> memory.classifyExistingRelations()
+                            is AgentMemoryAction.ReviewMemoryLink ->
+                                memory.reviewMemoryLink(action.sourceId, action.targetId, action.type, action.status)
+                            is AgentMemoryAction.DeleteRetainedMemory -> memory.deleteRetainedMemory(action.id)
+                            AgentMemoryAction.ClearRetainedMemory -> memory.clearRetainedMemory()
+                            AgentMemoryAction.ClearExperiences -> memory.clearExperiences()
+                            is AgentMemoryAction.SaveWebDav -> memory.saveWebDav(
+                                action.endpoint, action.username, action.password, action.passphrase,
+                            )
+                            AgentMemoryAction.RunWebDavSync -> memory.runWebDavSync()
+                            AgentMemoryAction.ConfirmWebDavMemoryResolution -> memory.runWebDavSync(
+                                resolveReviewedMemoryConflict = true,
+                            )
+                            is AgentMemoryAction.ToggleWebDavAutoSync ->
+                                memory.setWebDavAutoSyncEnabled(action.enabled)
+                            AgentMemoryAction.ClearWebDavConfig -> memory.clearWebDavConfig()
+                            is AgentMemoryAction.SaveKnowledge -> memory.saveKnowledge(
+                                action.title, action.content, action.kind, action.source,
+                                action.tags, action.id, action.revision,
+                            )
+                            is AgentMemoryAction.DeleteKnowledge -> memory.deleteKnowledge(action.id, action.revision)
                             is AgentMemoryAction.DraftChanged -> memory.updateMemoryDraft(action.content)
                             AgentMemoryAction.Save -> memory.saveMemory()
                             AgentMemoryAction.Clear -> memory.clearMemory()
                             AgentMemoryAction.DismissNotice -> memory.dismissMemoryNotice()
+                        }
+                    },
+                )
+            }
+            entry<AppRoute.UserPrompt>(swipeDismiss = swipeDismiss) {
+                LaunchedEffect(Unit) {
+                    userPrompt.refreshPrompt()
+                }
+                AgentUserPromptScreen(
+                    state = userPrompt.promptState,
+                    onAction = { action ->
+                        when (action) {
+                            AgentUserPromptAction.NavigateBack -> popRoute()
+                            is AgentUserPromptAction.ModeChanged -> userPrompt.setMode(action.mode)
+                            is AgentUserPromptAction.DraftChanged -> userPrompt.updateDraft(action.content)
+                            AgentUserPromptAction.Save -> userPrompt.savePrompt()
+                            AgentUserPromptAction.Reload -> userPrompt.refreshPrompt()
+                            AgentUserPromptAction.Clear -> userPrompt.clearPrompt()
+                            AgentUserPromptAction.DismissNotice -> userPrompt.dismissNotice()
+                            is AgentUserPromptAction.Import -> userPrompt.prepareImport(action.uri)
+                            AgentUserPromptAction.ConfirmImport -> userPrompt.confirmImport()
+                            AgentUserPromptAction.CancelImport -> userPrompt.cancelImport()
+                            AgentUserPromptAction.OpenEditor -> userPrompt.openEditor()
+                            AgentUserPromptAction.InstallBuiltin -> userPrompt.installBuiltin()
+                            is AgentUserPromptAction.EnabledChanged -> userPrompt.setEnabled(action.enabled)
                         }
                     },
                 )
@@ -717,6 +804,9 @@ fun AgentAppRoot(
                     onNavigate = { route -> pushRoute(route) },
                     onBack = ::popRoute,
                 )
+            }
+            entry<AppRoute.Subagent>(swipeDismiss = swipeDismiss) {
+                SubagentSettingsScreen(onBack = ::popRoute)
             }
             entry<AppRoute.SharedFolders>(swipeDismiss = swipeDismiss) {
                 SharedFoldersScreen(

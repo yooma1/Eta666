@@ -45,7 +45,13 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
             }
             .also {
                 ProviderRequestHeaders.mergeInto(
-                    it, config.baseUrl, config.customHeaders, request.sessionId, config.authMode,
+                    builder = it,
+                    baseUrl = config.baseUrl,
+                    customHeaders = config.customHeaders,
+                    sessionId = request.sessionId,
+                    authMode = config.authMode,
+                    model = config.model,
+                    sourceType = config.providerSourceType,
                 )
             }
             .build()

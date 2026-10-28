@@ -40,9 +40,10 @@ internal object AgentToolRequirements {
             "set_alarm", "set_timer", "device_status", "inspect_app", "media_control", "set_volume",
             "search_notification_history", "recent_app_activity", "app_usage_summary",
             "get_current_location", "get_device_environment", "memory_get", "memory_write",
+            "knowledge_search", "knowledge_get", "knowledge_save", "knowledge_delete",
             "character_memory_get", "character_memory_write",
-            "skills_list", "skills_read", "skills_read_resource", "skills_list_curated",
-            "skills_inspect_github", "skills_install_from_github",
+            "skills_list", "skills_read", "skills_read_resource", "skills_suggest",
+            "skills_list_curated", "skills_inspect_github", "skills_install_from_github",
         )
         register(
             RootRequirement.PARTIAL,
@@ -60,6 +61,8 @@ internal object AgentToolRequirements {
             "search_downloads", "search_notes", "search_coloros_recordings",
             "search_recording_summaries", "search_system_memories", "search_saved_places",
             "search_qq_chat_images", "search_wechat_chat_images",
+            "process_list", "mem_read", "mem_search", "mem_write", "frida_ps", "frida_script",
+            "mcp_call",
         )
         PersonalSearchTools.names.forEach { put(it, LocalToolRequirement(RootRequirement.REQUIRED, colorOs = true)) }
         AgentPhoneToolCatalog.entries.forEach { entry ->

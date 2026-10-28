@@ -116,17 +116,38 @@ import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-@Composable
-internal fun rememberDataUrlBitmap(dataUrl: String) = remember(dataUrl) {
-    decodeDataUrlBitmap(dataUrl)
-}
+/** 缩略图上限：100dp 在 3x 屏上是 300px，40 万像素够用，再大纯属浪费内存。 */
+internal const val THUMBNAIL_MAX_PIXELS = 400_000L
 
-internal fun decodeDataUrlBitmap(dataUrl: String): ImageBitmap? {
+/**
+ * @param maxPixels 大于 0 时按 2 的幂降采样到不超过这个像素数；看图器传 0 取全分辨率。
+ *
+ * 为什么要这个参数：历史消息里存的是 1600 长边的展示档，直接按原尺寸解成 100dp 缩略图，
+ * 每张要占 7.7MB ARGB，一屏十几张就够 OOM 了。
+ */
+@Composable
+internal fun rememberDataUrlBitmap(dataUrl: String, maxPixels: Long = 0L) =
+    remember(dataUrl, maxPixels) { decodeDataUrlBitmap(dataUrl, maxPixels) }
+
+internal fun decodeDataUrlBitmap(dataUrl: String, maxPixels: Long = 0L): ImageBitmap? {
     val base64 = dataUrl.substringAfter("base64,", "")
     if (base64.isBlank()) return null
     return runCatching {
         val bytes = Base64.decode(base64, Base64.NO_WRAP)
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        val options = BitmapFactory.Options()
+        if (maxPixels > 0) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            while (
+                bounds.outWidth > 0 && bounds.outHeight > 0 &&
+                bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > maxPixels
+            ) {
+                sample *= 2
+            }
+            options.inSampleSize = sample
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
     }.getOrNull()
 }
 
@@ -199,6 +220,8 @@ internal fun ChatMessageItem(
     showCopyAction: Boolean = true,
     showMessageActions: Boolean = false,
     messageActionsEnabled: Boolean = true,
+    /** 是否允许打开长按菜单（复制/编辑）。运行中也为 true，与删除/重写历史分开。 */
+    messageMenuEditable: Boolean = true,
     isEditing: Boolean = false,
     onEditMessage: (String) -> Unit = {},
     onDeleteMessage: (String) -> Unit = {},
@@ -210,6 +233,7 @@ internal fun ChatMessageItem(
             message = message,
             assistantOverlay = assistantOverlay,
             actionsEnabled = messageActionsEnabled,
+            menuEditable = messageMenuEditable,
             isEditing = isEditing,
             onEdit = { onEditMessage(message.id) },
             onDelete = { onDeleteMessage(message.id) },
@@ -291,6 +315,8 @@ private fun UserMessageBubble(
     message: UserMessageUi,
     assistantOverlay: Boolean,
     actionsEnabled: Boolean,
+    /** 运行中也允许打开菜单；删除按钮仍只在 actionsEnabled 时出现。 */
+    menuEditable: Boolean,
     isEditing: Boolean,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -351,7 +377,7 @@ private fun UserMessageBubble(
                                 onEdit()
                             },
                         )
-                        MessageTooltipAction(
+                        if (actionsEnabled) MessageTooltipAction(
                             icon = Icons.Rounded.Delete,
                             label = stringResource(R.string.ui_delete_3755f5),
                             onClick = {
@@ -364,7 +390,7 @@ private fun UserMessageBubble(
             },
             state = tooltipState,
             focusable = true,
-            enableUserInput = actionsEnabled,
+            enableUserInput = actionsEnabled || menuEditable,
         ) {
             Column(
                 modifier = Modifier
@@ -400,24 +426,7 @@ private fun UserMessageBubble(
                     ),
             ) {
                 if (message.images.isNotEmpty()) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    ) {
-                        message.images.forEach { dataUrl ->
-                            val bitmap = rememberDataUrlBitmap(dataUrl)
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = stringResource(R.string.chat_image_attachment),
-                                    modifier = Modifier
-                                        .size(100.dp)
-                                        .clip(RoundedCornerShape(12.dp)),
-                                    contentScale = ContentScale.Crop,
-                                )
-                            }
-                        }
-                    }
+                    MessageImageRow(images = message.images)
                 }
                 if (visiblePrompt.references.isNotEmpty()) {
                     SentFileReferenceFlow(
@@ -1169,4 +1178,35 @@ private fun SuggestionChipsRow(
             }
         }
     }
+}
+
+/**
+ * 消息里的附图：100dp 缩略图，点开看原图。
+ *
+ * 状态放在这里而不是提到 ChatMessageItem 顶层：一个消息可能有多张图，各自点开时
+ * 需要知道「点的是哪一张」，而这个状态只被这一行用，提上去只会让参数变长。
+ */
+@Composable
+private fun MessageImageRow(images: List<String>) {
+    var viewedImage by remember { mutableStateOf<String?>(null) }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.padding(bottom = 8.dp),
+    ) {
+        images.forEach { dataUrl ->
+            val bitmap = rememberDataUrlBitmap(dataUrl, THUMBNAIL_MAX_PIXELS)
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = stringResource(R.string.chat_image_attachment),
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(interactionSource = null, indication = null) { viewedImage = dataUrl },
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+    }
+    ImageViewerDialog(dataUrl = viewedImage, onDismiss = { viewedImage = null })
 }

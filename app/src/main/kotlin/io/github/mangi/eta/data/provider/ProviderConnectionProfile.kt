@@ -50,7 +50,9 @@ internal enum class ProviderConnectionProfile(
             ProviderAuthModes.API_KEY -> null
             ProviderAuthModes.OPENAI_CHATGPT -> OPENAI_CODEX
             ProviderAuthModes.XAI_GROK -> XAI_GROK
-            else -> error("不支持的服务商认证方式")
+            // 未知认证方式按普通 API Key 连接处理：请求路径不应因为一个存量脏值整轮失败。
+            // 真正需要拒绝的地方在 AgentModelClient.ModelConfig.validate()，那里会给出可读提示。
+            else -> null
         }
     }
 }

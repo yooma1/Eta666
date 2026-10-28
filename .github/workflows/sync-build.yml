@@ -1,0 +1,410 @@
+name: Sync Skills & Build APK
+
+on:
+  # 只保留手动触发：上游合并与技能适配是"有破坏性"的动作，
+  # 不再定时跑、也不接受 webhook 自动触发。要同步时说一声或手动 Run workflow。
+  # 日常改动推送到 main 只会走 build-only.yml（只编译，不合并上游）。
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      force_sync:
+        description: 'Force full re-sync even without upstream changes'
+        required: false
+        default: false
+        type: boolean
+      code_conflict_policy:
+        description: '上游代码文件冲突策略：skip=中止合并并开 issue（默认，最安全）；ours=保留 fork 版继续合并（上游同区域改动被跳过，会在 issue 中列明）'
+        required: false
+        default: 'skip'
+        type: choice
+        options:
+          - skip
+          - ours
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Job 0: 同步上游 Eta 代码（定时/手动/webhook 时运行；push 事件主分支已是最新，跳过）
+  # ──────────────────────────────────────────────
+  sync-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: github.event_name != 'push'
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge upstream changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODE_CONFLICT_POLICY: ${{ inputs.code_conflict_policy || 'skip' }}
+        run: |
+          git remote add upstream https://github.com/Mangi-11/Eta.git 2>/dev/null || true
+          git fetch upstream main
+          git config user.name "Z1og"
+          git config user.email "59019705+Z1og@users.noreply.github.com"
+
+          echo "PRE_MERGE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND"
+          if [[ "$BEHIND" -eq 0 ]]; then
+            echo "MERGED=false" >> "$GITHUB_ENV"
+            echo "Upstream already merged"
+            exit 0
+          fi
+
+          if git merge upstream/main --no-edit; then
+            echo "MERGED=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # 冲突处理：
+          # - manifest.json → 并集合并（不丢上游新技能，也不丢 fork 技能）
+          # - 技能生成物 / fork 自维护 CI → 取 fork 版（ours，由适配器/本仓库重建）
+          # - 其余代码文件 → 按 code_conflict_policy：skip=中止并开 issue；ours=保留 fork 版继续
+          RESOLVABLE=true
+          SKIPPED_UPSTREAM=""
+          CONFLICT_LIST=""
+          for f in $(git diff --name-only --diff-filter=U); do
+            case "$f" in
+              app/src/main/assets/builtin_skills/manifest.json)
+                if python3 merge-manifest.py "$f"; then
+                  git add "$f"
+                  echo "auto-resolved (union): $f"
+                else
+                  RESOLVABLE=false
+                  CONFLICT_LIST="${CONFLICT_LIST}- $f（并集合并失败）"$'\n'
+                fi
+                ;;
+              hanshuang-eta-skills/*|app/src/main/assets/builtin_skills/*|.github/workflows/*|README.md|README_EN.md)
+                git checkout --ours "$f" && git add "$f"
+                echo "auto-resolved (ours): $f"
+                ;;
+              *)
+                if [[ "$CODE_CONFLICT_POLICY" == "ours" ]]; then
+                  git checkout --ours "$f" && git add "$f"
+                  SKIPPED_UPSTREAM="${SKIPPED_UPSTREAM}- $f"$'\n'
+                  echo "auto-resolved (ours by policy): $f"
+                else
+                  RESOLVABLE=false
+                  CONFLICT_LIST="${CONFLICT_LIST}- $f"$'\n'
+                fi
+                ;;
+            esac
+          done
+
+          if [[ "$RESOLVABLE" != "true" ]]; then
+            git merge --abort
+            # 仓库 issue 已禁用：冲突详情写入 run summary，保证有人能看到
+            {
+              echo "## 上游合并冲突：本次跳过上游合并（技能适配与构建照常）"
+              echo ""
+              echo "冲突文件（手动解决后用 workflow_dispatch 重跑；或用 code_conflict_policy=ours 保留 fork 版）："
+              echo ""
+              echo "${CONFLICT_LIST:-（详见 workflow 日志）}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            gh issue create -R Z1og/Eta2 \
+              --title "上游合并冲突：需要手动解决" \
+              --body "上游 Mangi-11/Eta 更新与 fork 代码冲突，本次跳过上游合并；技能适配与构建照常进行。
+
+          冲突文件（手动解决后可用 workflow_dispatch 重跑本管线；或用 code_conflict_policy=ours 保留 fork 版）：
+          ${CONFLICT_LIST:-（详见 workflow 日志）}" \
+              || echo "::warning::issue create failed（仓库已禁用 issue，冲突详情见本 run 的 Summary）"
+            echo "::error::代码冲突，已跳过上游合并（技能适配与构建照常）"
+            exit 1
+          fi
+
+          GIT_EDITOR=true git merge --continue
+          echo "MERGED=true" >> "$GITHUB_ENV"
+          if [ -n "$SKIPPED_UPSTREAM" ]; then
+            {
+              echo "SKIPPED_UPSTREAM<<GITHUB_ENV_EOF"
+              printf '%s\n' "$SKIPPED_UPSTREAM"
+              echo "GITHUB_ENV_EOF"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up JDK 25 (compile gate)
+        if: env.MERGED == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle (compile gate)
+        if: env.MERGED == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-provider: basic
+
+      - name: Set up Android SDK (compile gate)
+        if: env.MERGED == 'true'
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android SDK 37 (compile gate)
+        if: env.MERGED == 'true'
+        run: sdkmanager --channel=3 "platforms;android-37.0"
+
+      - name: Compile gate (merged tree must build)
+        if: env.MERGED == 'true'
+        run: |
+          set -o pipefail
+          if ./gradlew --no-daemon --no-configuration-cache :app:compileDebugKotlin 2>&1 | tee compile-gate.log; then
+            echo "COMPILE_FAILED=false" >> "$GITHUB_ENV"
+          else
+            echo "COMPILE_FAILED=true" >> "$GITHUB_ENV"
+            echo "::error::合并结果编译失败：将回滚本次上游合并"
+            exit 1
+          fi
+
+      - name: Push merged result / rollback on failure
+        if: always() && env.MERGED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${COMPILE_FAILED:-false}" = "true" ]; then
+            git reset --hard "$PRE_MERGE_SHA"
+            gh issue create -R Z1og/Eta2 \
+              --title "上游合并后编译失败：已自动回滚本次合并" \
+              --body "上游更新与 fork 合并后 :app:compileDebugKotlin 失败，已回滚到合并前（${PRE_MERGE_SHA}）。技能适配与构建照常进行（基于合并前代码）。人工核对后可用 workflow_dispatch 重跑本管线；编译错误摘要见 workflow 日志。" \
+              || echo "::warning::issue create failed"
+            head -n 200 compile-gate.log || true
+            exit 1
+          fi
+          if [ -n "${SKIPPED_UPSTREAM:-}" ]; then
+            gh issue create -R Z1og/Eta2 \
+              --title "上游合并采用 ours 策略：以下文件的上游改动被跳过" \
+              --body "code_conflict_policy=ours，以下上游文件改动未合入（保留 fork 版），请人工核对是否需要回补：
+
+          ${SKIPPED_UPSTREAM}" \
+              || echo "::warning::issue create failed"
+          fi
+          git push origin main
+
+  # ──────────────────────────────────────────────
+  # Job 1: 同步 + 适配技能源（上游 merge 完成后再跑，保证基于最新 main）
+  # ──────────────────────────────────────────────
+  sync-skills:
+    needs: [sync-upstream]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check_changes.outputs.has_changes }}
+      skill_count: ${{ steps.adapt.outputs.skill_count }}
+    steps:
+      - name: Checkout Eta
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache hanshuang-codex repo
+        uses: actions/cache@v4
+        with:
+          path: .cache/hanshuang-codex
+          key: hanshuang-codex-${{ github.run_id }}
+          restore-keys: |
+            hanshuang-codex-
+
+      - name: Fetch and adapt skills
+        id: adapt
+        run: |
+          # 始终全量运行（--skip-fetch 仅在缓存确认有效时使用）
+          python3 hanshuang-to-eta.py 2>&1
+
+          # 部署到 builtin_skills（编译打包用）
+          python3 hanshuang-to-eta.py --skip-fetch --builtin 2>&1
+
+          # 输出 skill 数量（从 builtin_skills manifest 读取，确保准确）
+          SKILL_COUNT=$(python3 -c "import json; print(len(json.load(open('app/src/main/assets/builtin_skills/manifest.json'))['skills']))")
+
+          # 验证：如果 skill 数量少于 10，说明适配失败
+          if [[ "$SKILL_COUNT" -lt 10 ]]; then
+            echo "::error::Skill count ($SKILL_COUNT) is too low, adapter may have failed"
+            exit 1
+          fi
+
+          echo "skill_count=$SKILL_COUNT" >> "$GITHUB_OUTPUT"
+          echo "Adapted $SKILL_COUNT skills"
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet hanshuang-eta-skills/ app/src/main/assets/builtin_skills/; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No skill changes detected"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            git diff --stat hanshuang-eta-skills/ app/src/main/assets/builtin_skills/ | tail -5
+          fi
+
+      - name: Commit skill changes
+        if: steps.check_changes.outputs.has_changes == 'true' || inputs.force_sync == true
+        run: |
+          git config user.name "Z1og"
+          git config user.email "59019705+Z1og@users.noreply.github.com"
+
+          # 先暂存脚本产生的变更
+          git add hanshuang-eta-skills/ app/src/main/assets/builtin_skills/
+
+          # 先 fetch rebase，避免 push 被远程新提交拒
+          git fetch origin main
+          # 用 stash 方式避免 rebase 时 unstaged changes 报错
+          git stash
+          git rebase origin/main || {
+            echo "::warning::Rebase failed, attempting merge"
+            git rebase --abort 2>/dev/null || true
+            git merge --no-edit origin/main
+          }
+          git stash pop || true
+
+          git add hanshuang-eta-skills/ app/src/main/assets/builtin_skills/
+          git commit -m "chore(skills): sync from hanshuang-codex ($(date +%Y-%m-%d))" || echo "Nothing to commit"
+          git push origin HEAD:main
+
+  # ──────────────────────────────────────────────
+  # Job 2: 编译 APK（照搬上游已验证配置）
+  # ──────────────────────────────────────────────
+  build-apk:
+    needs: [sync-upstream, sync-skills]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Eta
+        uses: actions/checkout@v4
+
+      - name: Determine build type
+        id: build_type
+        run: |
+          # 默认 release，仅当明确选择 debug 时才走 debug
+          if [[ "${{ inputs.build_type }}" == "debug" ]]; then
+            echo "type=debug" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-provider: basic
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android SDK 37
+        run: sdkmanager --channel=3 "platforms;android-37.0"
+
+      - name: Build debug APK
+        if: steps.build_type.outputs.type == 'debug'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug --stacktrace
+          echo "APK_PATH=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        if: steps.build_type.outputs.type == 'release'
+        env:
+          ETA_RELEASE_KEYSTORE_BASE64: ${{ secrets.ETA_RELEASE_KEYSTORE_BASE64 }}
+          ETA_RELEASE_STORE_PASSWORD: ${{ secrets.ETA_RELEASE_STORE_PASSWORD }}
+          ETA_RELEASE_KEY_ALIAS: ${{ secrets.ETA_RELEASE_KEY_ALIAS }}
+          ETA_RELEASE_KEY_PASSWORD: ${{ secrets.ETA_RELEASE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$ETA_RELEASE_KEYSTORE_BASE64" || -z "$ETA_RELEASE_STORE_PASSWORD" || \
+                -z "$ETA_RELEASE_KEY_ALIAS" || -z "$ETA_RELEASE_KEY_PASSWORD" ]]; then
+            echo "::error::Missing release signing secrets"
+            exit 1
+          fi
+          printf '%s' "$ETA_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/eta-release.jks"
+
+          export ETA_RELEASE_STORE_FILE="$RUNNER_TEMP/eta-release.jks"
+          chmod +x gradlew
+          ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease --stacktrace
+          echo "APK_PATH=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eta-${{ steps.build_type.outputs.type }}-${{ github.sha }}
+          path: ${{ env.APK_PATH }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.build_type.outputs.type == 'release' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ github.run_number }}
+          SKILL_COUNT: ${{ needs.sync-skills.outputs.skill_count || 'N/A' }}
+          BUILD_TYPE: ${{ steps.build_type.outputs.type }}
+          COMMIT_TS: ${{ github.event.head_commit.timestamp || 'manual trigger' }}
+        run: |
+          set -e
+          # 上游 gradle 会把产物改名（如 Eta-v<version>.apk），通配定位实际生成的 APK
+          APK="${APK_PATH:-}"
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            APK=$(ls -1 app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1)
+          fi
+          [ -n "$APK" ] && [ -f "$APK" ] || { echo "::error::APK not found under app/build/outputs/apk/release/"; exit 1; }
+          echo "using APK: $APK"
+
+          # 清理上次失败留下的无资产草稿（v58 事故的复现防护）
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            ASSETS=$(gh release view "$TAG" --json assets --jq 'length(.assets)')
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+            if [ "$ASSETS" -eq 0 ] && [ "$IS_DRAFT" = "true" ]; then
+              echo "Removing stale empty draft $TAG"
+              gh release delete "$TAG" --yes || true
+            fi
+          fi
+
+          # 创建（含重试 3 次；瞬时 API 错误如 "other side closed" 常见于此步骤）
+          ok=""
+          for i in 1 2 3; do
+            if gh release create "$TAG" "$APK" \
+                --title "Eta $TAG - release" \
+                --notes "Automated build from commit ${GITHUB_SHA}. Skills: ${SKILL_COUNT} adapted. Build type: ${BUILD_TYPE}. Date: ${COMMIT_TS}." \
+                --latest; then
+              ok=1; break
+            fi
+            # 已存在（并发/重跑）→ 上传覆盖并发布
+            if gh release upload "$TAG" "$APK" --clobber 2>/dev/null; then
+              gh release edit "$TAG" --draft=false --latest && { ok=1; break; }
+            fi
+            echo "attempt $i failed; retrying in 10s"
+            sleep 10
+          done
+          [ -n "$ok" ] || { echo "::error::release create failed after 3 attempts"; exit 1; }
+          gh release view "$TAG" --json tagName,isDraft,assets --jq '{tag:.tagName,draft:.isDraft,assets:[.assets[].name]}'

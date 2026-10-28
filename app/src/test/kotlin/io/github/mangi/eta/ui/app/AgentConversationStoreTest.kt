@@ -10,6 +10,7 @@ import io.github.mangi.eta.agent.roleplay.RoleplayMessageState
 import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
+import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
@@ -25,6 +26,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +93,15 @@ class AgentConversationStoreTest {
         assertEquals(listOf(original), switched.journal)
     }
 
+    /**
+     * 载入时为省内存跳过 journal 的会话，保存时必须保持库里的 journal 不变。
+     * 否则 Content 的 `journal.ifEmpty { history }` 会把完整记录替换成 history——静默丢数据。
+     */
+    /**
+     * 冷启动默认不还原非选中会话的 history。这里同时验证两件事：
+     * 1. 大 history 确实被延迟（historyNotLoadedIds 里能看到）；
+     * 2. 延迟状态下再保存，不能把库里的 history 覆盖成空。
+     */
     @Test
     fun saveAndLoadPreservesConversations() {
         val conversation = AgentChatHomeUiState(
@@ -535,11 +546,19 @@ class AgentConversationStoreTest {
             assertTrue(state.homeState.appliedRuntimeRunIds.isEmpty())
             assertTrue(state.homeState.roleplayMessages.pendingRewrites.isEmpty())
 
+            // 新会话默认沿用上次使用的角色设定（设置 → 上下文与扩展 可关）。
             state.createConversation()
-            assertEquals(null, state.homeState.roleplay)
+            assertEquals(binding, state.homeState.roleplay)
             assertTrue(state.homeState.history.isEmpty())
             assertTrue(state.homeState.messages.isEmpty())
             assertFalse(state.homeState.isStreaming)
+
+            // 关掉开关后回到普通会话。
+            requireNotNull(Prefs.localAgentPreferences()).edit()
+                .putBoolean(Prefs.Keys.AGENT_ROLEPLAY_DEFAULT, false)
+                .commit()
+            state.createConversation()
+            assertEquals(null, state.homeState.roleplay)
         } finally {
             scope.cancel()
         }

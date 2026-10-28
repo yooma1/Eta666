@@ -46,6 +46,7 @@ import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +61,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.core.LogExporter
+import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.agent.accessibility.AccessibilityProtectionClient
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
 import io.github.mangi.eta.config.PowerAssistantTarget
@@ -105,8 +108,16 @@ internal fun SettingsScreen(
     context: Context,
     onNavigate: (AppRoute) -> Unit,
     onBack: () -> Unit,
+    reverseModeEnabled: Boolean = false,
+    onToggleReverseMode: (Boolean) -> Unit = {},
 ) {
-    SettingsPageContent(context = context, onNavigate = onNavigate, onBack = onBack)
+    SettingsPageContent(
+        context = context,
+        onNavigate = onNavigate,
+        onBack = onBack,
+        reverseModeEnabled = reverseModeEnabled,
+        onToggleReverseMode = onToggleReverseMode,
+    )
 }
 
 @Composable
@@ -114,6 +125,8 @@ private fun SettingsPageContent(
     context: Context,
     onNavigate: (AppRoute) -> Unit,
     onBack: () -> Unit,
+    reverseModeEnabled: Boolean,
+    onToggleReverseMode: (Boolean) -> Unit,
 ) {
     val coroutineScope = rememberCoroutineScope()
     val capabilities = rememberDeviceCapabilities()
@@ -154,6 +167,35 @@ private fun SettingsPageContent(
     }
     var checkingUpdate by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppLatestRelease?>(null) }
+    // 导出运行日志：卡死/闪退时没有 adb 也能把证据拿出来。
+    var exportingLog by remember { mutableStateOf(false) }
+    val exportLog: () -> Unit = {
+        if (!exportingLog) {
+            exportingLog = true
+            coroutineScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { LogExporter.export(context.applicationContext) }
+                }
+                exportingLog = false
+                result.onSuccess { path ->
+                    Toast.makeText(
+                        context.applicationContext,
+                        context.getString(R.string.ui_about_export_log_done, path),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }.onFailure { error ->
+                    Toast.makeText(
+                        context.applicationContext,
+                        context.getString(
+                            R.string.ui_about_export_log_failed,
+                            error.message ?: error.javaClass.simpleName,
+                        ),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
     val checkForUpdate: () -> Unit = {
         if (!checkingUpdate) {
             checkingUpdate = true
@@ -307,6 +349,28 @@ private fun SettingsPageContent(
                     )
 
                     EtaPreferenceDivider()
+                    ManagedSwitchPref(
+                        title = "逆向能力",
+                        summary = "统一控制逆向技能、作战协议与破甲记忆（与技能页同一开关）",
+                        checked = reverseModeEnabled,
+                        icon = Icons.Rounded.Security,
+                        iconTint = EtaPreferenceColors.Orange,
+                        onCheckedChange = onToggleReverseMode,
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
+                        title = "编辑作战协议",
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.ImportContacts,
+                                tint = EtaPreferenceColors.Blue,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.UserPrompt) },
+                    )
+
+                    EtaPreferenceDivider()
                     EtaArrowPreference(
                         title = "Subagent",
                         startAction = {
@@ -340,6 +404,17 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.McpServers) },
+                    )
+
+                    EtaPreferenceDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = "新会话默认带角色",
+                        summary = "新建会话自动沿用上次使用的角色设定",
+                        key = Prefs.Keys.AGENT_ROLEPLAY_DEFAULT,
+                        icon = Icons.Rounded.SportsBar,
+                        iconTint = EtaPreferenceColors.Orange,
                     )
 
                     EtaPreferenceDivider()
@@ -426,6 +501,19 @@ private fun SettingsPageContent(
                         key = Prefs.Keys.AGENT_TERMINAL_TOOLS,
                         icon = Icons.Rounded.Terminal,
                         iconTint = EtaPreferenceColors.Green,
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
+                        title = stringResource(R.string.subagent_page_title),
+                        summary = stringResource(R.string.ui_enable_subagent_5c1f8e),
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.AccountTree,
+                                tint = EtaPreferenceColors.Blue,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.Subagent) },
                     )
 
                     EtaPreferenceDivider()
@@ -836,6 +924,21 @@ private fun SettingsPageContent(
 
                     EtaPreferenceDivider()
                     EtaArrowPreference(
+                        title = stringResource(R.string.ui_about_export_log_title),
+                        summary = stringResource(R.string.ui_about_export_log_hint),
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.Description,
+                                tint = EtaPreferenceColors.Green,
+                                enabled = !exportingLog,
+                            )
+                        },
+                        enabled = !exportingLog,
+                        onClick = exportLog,
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
                         title = stringResource(R.string.ui_about_github_star_title),
                         summary = stringResource(R.string.ui_about_github_star_hint),
                         startAction = {
@@ -929,6 +1032,30 @@ private fun SystemizerConfirmDialog(
             onConfirm = onConfirm,
         )
     }
+}
+
+/**
+ * 由页面级状态驱动的开关。
+ *
+ * The reverse bundle is one DataStore-backed switch across all settings screens.
+ */
+@Composable
+private fun ManagedSwitchPref(
+    title: String,
+    summary: String?,
+    checked: Boolean,
+    icon: ImageVector,
+    iconTint: Color,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    EtaSwitchPreference(
+        title = title,
+        summary = summary,
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        startAction = { EtaPreferenceIcon(icon = icon, tint = iconTint) },
+        enabled = true,
+    )
 }
 
 // ── 带图标的布尔开关 ─────────────────────────────────────────────────────────

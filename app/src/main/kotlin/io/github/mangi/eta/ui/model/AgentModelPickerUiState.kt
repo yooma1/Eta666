@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import io.github.mangi.eta.data.model.Model
 import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
 import java.text.NumberFormat
 import java.util.Locale
@@ -69,9 +70,12 @@ internal object AgentModelPickerProjector {
                 .firstOrNull { it.id == selectedModelId }
         val groups = enabledProviders
             .asSequence()
-            .filter {
-                ProviderAuthModes.isOAuth(it.authMode) ||
-                    (it.authMode == ProviderAuthModes.API_KEY && it.apiKey.isNotBlank())
+            // 上游：OAuth 登录的 provider 不需要 API Key 也应出现在选择器里。
+            // 分支：OpenCode 内嵌网关自带 loopback key，外部 key 为空时也要能选到已导入的 Zen 模型。
+            .filter { provider ->
+                ProviderAuthModes.isOAuth(provider.authMode) ||
+                    (provider.authMode == ProviderAuthModes.API_KEY && provider.apiKey.isNotBlank()) ||
+                    ProviderSourceRegistry.resolve(provider) == ProviderSourceTypes.OPENCODE
             }
             .mapNotNull { provider ->
                 val sourceType = ProviderSourceRegistry.resolve(provider)

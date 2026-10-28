@@ -29,6 +29,8 @@ internal class AgentLoop(
     private val traceFormatter: AgentTraceFormatter,
     private val onEvent: (AgentEvent) -> Unit,
     private val toolsForRound: (() -> JSONArray)? = null,
+    /** 每轮工具结果回传后的重触发钩子：返回非空提示文本时，作为「技能提示」追加到下一轮上下文。 */
+    private val onToolResultsHint: ((String) -> String?)? = null,
     private val modelRetry: AgentModelRetry = AgentModelRetry(),
     private val sessionId: String = java.util.UUID.randomUUID().toString(),
     private val transcript: JSONArray = JSONArray(),
@@ -39,6 +41,12 @@ internal class AgentLoop(
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
+    /** 持续目标正文；非空时模型自然收尾后会自动续跑，直到达成、被取消或触及上限。 */
+    private val goal: String = "",
+    /** 当前子任务清单进度；有清单时以清单为完成依据，而不是模型自己的说法。 */
+    private val goalProgress: (() -> GoalProgress?)? = null,
+    /** 本地轮次上限，0 表示不设限（主 run 沿用模型自然结束）。子代理必须给上限。 */
+    private val maxRounds: Int = 0,
 ) {
     data class Result(
         val content: String,
@@ -70,6 +78,12 @@ internal class AgentLoop(
         transcript.put(message)
     }
 
+    private var skillHintIndex = 0
+
+    /** 目标已经续跑过的轮数，以及是否已经收敛（完成 / blocked / 取消 / 触顶）。 */
+    private var goalContinuations = 0
+    private var goalSettled = false
+
     private var publishedTranscriptSize = 0
 
     private fun publishTranscript() {
@@ -91,7 +105,18 @@ internal class AgentLoop(
         var round = 1
         var precedingTools: JSONArray? = null
 
+        // 单次拒绝只跳过当前子任务；连续拒绝达到上限才升级为失败，交给执行层换端 failover。
+        var consecutiveRefusals = 0
+
         while (true) {
+            // 子代理没有用户盯着，必须有本地上限：目标写得含糊时它不会自己认输。
+            if (maxRounds > 0 && round > maxRounds) {
+                throw AgentModelFailure(
+                    "ROUND_LIMIT",
+                    false,
+                    "本次运行超过 $maxRounds 轮上限，已停止；请缩小任务范围后重试。",
+                )
+            }
             runController.throwIfCancelled()
             if (purpose.allowsTools) appendPendingSteeringMessage()
 
@@ -162,6 +187,28 @@ internal class AgentLoop(
             if (purpose == ProviderRequestPurpose.REPLY_REWRITE && providerResponse.stopReason != AssistantStopReason.END_TURN) {
                 throw AgentModelFailure("REPLY_REWRITE_INCOMPLETE", false, "模型未返回完整的改写回复；原回复未改变。")
             }
+            if (purpose.allowsTools && toolCalls.isEmpty() &&
+                AgentModelRefusal.isRefusal(assistantMessage.optString("content"))
+            ) {
+                // 拒绝内容不入上下文（否则后续轮次被「我不能…」带偏）。单次拒绝只跳过这个子任务：
+                // 追加中性的续跑指令，让既定计划继续推进；连续拒绝才升级为失败交由 failover。
+                if (consecutiveRefusals >= REFUSAL_SKIP_LIMIT) {
+                    throw AgentModelRefusal.failure(assistantMessage.optString("content"))
+                }
+                consecutiveRefusals++
+                onEvent(
+                    AgentEvent.ModelRetryScheduled(
+                        round = round,
+                        attempt = consecutiveRefusals,
+                        maxAttempts = REFUSAL_SKIP_LIMIT + 1,
+                        delayMs = 0,
+                        reasonCode = "MODEL_REFUSAL_SKIPPED",
+                    ),
+                )
+                appendMessage(AgentConversationCodec.userTextMessage(AgentModelRefusal.continuationNote(consecutiveRefusals)))
+                continue
+            }
+            consecutiveRefusals = 0
             val assistantReasoning = assistantMessage.optString("reasoning_content")
             if (
                 assistantReasoning.isNotBlank() &&
@@ -193,6 +240,18 @@ internal class AgentLoop(
                 publishTranscript()
                 appendToolImages(round, outcomes)
                 publishTranscript()
+                // 运行中自动重触发：工具结果里出现新信号时，追加一条技能提示供下一轮参考。
+                // 提示只进 messages（供 provider），不进 transcript（不在会话 UI 显示）。
+                if (onToolResultsHint != null) {
+                    val hint = onToolResultsHint.invoke(outcomes.joinToString("\n") { it.result.content })
+                    if (!hint.isNullOrBlank()) {
+                        messages.put(
+                            AgentConversationCodec.userTextMessage("[Eta 技能提示] $hint")
+                                .put("_eta_message_id", "user-$operationId-skillhint-${++skillHintIndex}"),
+                        )
+                        context.userAppended()
+                    }
+                }
                 round += 1
                 continue
             }
@@ -200,7 +259,13 @@ internal class AgentLoop(
             publishTranscript()
 
             // assistant 已自然结束时再检查 steering。这样补充消息不会丢掉刚完成的回答。
-            if (purpose.allowsTools && appendPendingSteeringOrSeal()) {
+            // 目标还没收敛时不能封闭接收入口：run 仍在跑，后面来的补充指令必须还能进来。
+            if (purpose.allowsTools && appendPendingSteeringOrSeal(sealWhenEmpty = !hasActiveGoal())) {
+                round += 1
+                continue
+            }
+            // steering 优先于目标续跑：用户刚插进来的指令不该被自动续跑顶掉。
+            if (purpose.allowsTools && hasActiveGoal() && continueGoal(assistantMessage.optString("content"))) {
                 round += 1
                 continue
             }
@@ -213,9 +278,11 @@ internal class AgentLoop(
 
             publishTranscript()
             if (purpose.allowsTools) context.compact(final = true)
+            // 到这里才真正收尾：此后进来的补充指令会被拒绝，而不是被收下却永远不执行。
+            runController.sealSteering()
             onEvent(AgentEvent.RunFinished(round = round, contentChars = content.length))
             return Result(
-                content = content,
+                content = stripGoalStatus(content),
                 reasoningContent = reasoningSnapshot(),
                 sensitiveToolCallIds = sensitiveToolCallIds.toSet(),
             )
@@ -263,12 +330,87 @@ internal class AgentLoop(
         return true
     }
 
-    private fun appendPendingSteeringOrSeal(): Boolean {
-        val supplement = runController.pollSteeringOrSeal() ?: return false
+    private fun appendPendingSteeringOrSeal(sealWhenEmpty: Boolean = true): Boolean {
+        val supplement = if (sealWhenEmpty) {
+            runController.pollSteeringOrSeal()
+        } else {
+            runController.pollSteeringMessage()
+        } ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
         return true
     }
+
+    /** 目标还在推进中（有正文、且尚未判定完成/被取消/触及上限）。 */
+    private fun hasActiveGoal(): Boolean = goal.isNotBlank() && !goalSettled
+
+    /**
+     * 目标续跑的唯一判定点。
+     *
+     * 只在模型自己停下来之后调用：模型说过 done/blocked、用户取消、或触及轮次上限时不续跑。
+     * 上限是硬性的——目标写得含糊时，模型不会自己认输，没有上限就是无限烧 token。
+     */
+    private fun continueGoal(content: String): Boolean {
+        when (goalStatusOf(content)) {
+            // blocked 是"卡住了"，强行继续只会空转。
+            GOAL_STATUS_BLOCKED -> {
+                goalSettled = true
+                return false
+            }
+            // done 不在这里直接收工：模型经常做了一部分就宣布完成，
+            // 得先问清单——清单里还有待办，它说的 done 不算数。
+            else -> Unit
+        }
+        if (runController.isGoalCancelled) {
+            goalSettled = true
+            return false
+        }
+        val progress = goalProgress?.invoke()
+        if (progress != null && progress.total > 0) {
+            if (progress.allDone) {
+                goalSettled = true
+                return false
+            }
+            // 清单有未完成项：无视 done 继续推进（下面统一走轮次预算）。
+        } else if (goalStatusOf(content) == GOAL_STATUS_DONE) {
+            // 没有清单时只能信模型自己的判断。
+            goalSettled = true
+            return false
+        }
+        if (goalContinuations >= MAX_GOAL_CONTINUATIONS) {
+            goalSettled = true
+            appendMessage(
+                AgentConversationCodec.userTextMessage(
+                    "目标已连续推进 $MAX_GOAL_CONTINUATIONS 轮仍未报告完成，本轮到此结束。" +
+                        "不要继续调用工具；用一句话说明当前进度和剩余部分，交给用户决定下一步。",
+                ).put("_eta_message_id", "user-$operationId-goallimit"),
+            )
+            context.userAppended()
+            return true
+        }
+        goalContinuations++
+        val progressNote = progress?.takeIf { it.total > 0 }?.let {
+            "当前子任务进度：${it.done}/${it.total} 完成，还有 ${it.open} 条待办。" +
+                "用 task_write 更新清单状态，全部 done 才算目标达成。"
+        }.orEmpty()
+        appendMessage(
+            AgentConversationCodec.userTextMessage(
+                "继续推进目标：上一轮没有报告目标达成。" +
+                    progressNote +
+                    "先确认已经完成的部分，再处理剩余部分；不要重做已完成或已验证过的步骤。" +
+                    "确实无法继续时输出 <goal_status>blocked</goal_status> 并说明卡在哪。",
+            ).put("_eta_message_id", "user-$operationId-goal-$goalContinuations"),
+        )
+        context.userAppended()
+        return true
+    }
+
+    private fun goalStatusOf(content: String): String? =
+        GOAL_STATUS_REGEX.find(content)?.groupValues?.getOrNull(1)?.lowercase()
+
+    /** 完成标记是运行时信号，不该显示给用户。整段只有标记时保留原文，避免出现空回复。 */
+    private fun stripGoalStatus(content: String): String =
+        content.replace(GOAL_STATUS_REGEX, "").trim().ifBlank { content }
 
     private fun steeringPrompt(supplement: String): String =
         "用户补充指令：$supplement\n\n请基于当前任务上下文继续执行，不要从头重复已经完成或已经验证过的操作。"
@@ -571,3 +713,28 @@ internal class AgentLoop(
         }
 
 }
+
+/** 连续被拒多少个子任务后升级为失败（此前每次仅跳过当前子任务并续跑）。 */
+private const val REFUSAL_SKIP_LIMIT = 2
+
+/** 目标模式下子任务清单的进度快照，供续跑判定使用。 */
+internal data class GoalProgress(
+    val total: Int,
+    val done: Int,
+    val open: Int,
+    val allDone: Boolean,
+)
+
+/**
+ * 目标模式最多自动续跑多少轮。
+ *
+ * 目标含糊时模型不会自己认输，所以上限必须是硬性的；到顶就交回用户，
+ * 而不是继续烧 token 或反复执行同一批操作。
+ */
+private const val MAX_GOAL_CONTINUATIONS = 12
+
+private const val GOAL_STATUS_DONE = "done"
+private const val GOAL_STATUS_BLOCKED = "blocked"
+
+/** 容忍模型在标记里加空格或换行：解析失败就等于目标永远不收敛。 */
+private val GOAL_STATUS_REGEX = Regex("""<goal_status>\s*([A-Za-z]+)\s*</goal_status>""")

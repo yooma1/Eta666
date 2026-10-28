@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.model
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
+import io.github.mangi.eta.agent.skill.ReverseSkillCatalog
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.roleplay.RoleplayRunContext
 import io.github.mangi.eta.config.Prefs
@@ -19,6 +20,7 @@ import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.provider.BuiltinProviders
 import io.github.mangi.eta.data.provider.GeminiModelCapabilities
 import io.github.mangi.eta.data.provider.ProviderSourceRegistry
+import io.github.mangi.eta.data.repository.AgentUserPromptSnapshot
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
@@ -100,6 +102,14 @@ internal object AgentModelClient {
         skillContext: SkillContext = SkillContext.EMPTY,
         memoryContext: AgentMemoryContext = AgentMemoryContext.DISABLED,
         additionalTools: JSONArray = JSONArray(),
+        /**
+         * 只允许这些工具名出现在 schema 里；null 表示不限制（主 Agent 走默认）。
+         *
+         * 为什么必须在 schema 层过滤而不是只在执行层拦：模型是照着 schema 决策的，
+         * 把不该用的工具摆在那里、等它调用再报错，等于让它先想错再改错——它会反复试，
+         * 把轮次烧在「为什么这个工具不让我用」上。子代理的档案白名单要在这里生效。
+         */
+        allowedToolNames: Set<String>? = null,
         executionContext: TerminalExecutionContext? = null,
         capabilitiesProvider: () -> AgentToolCapabilities = { AgentToolCapabilities(rootAvailable = false) },
         sessionId: String = java.util.UUID.randomUUID().toString(),
@@ -111,6 +121,16 @@ internal object AgentModelClient {
         rewriteReply: Boolean = false,
         assistantScreenContext: String = "",
         toolFilter: ((JSONArray) -> JSONArray)? = null,
+        userPrompt: AgentUserPromptSnapshot = AgentUserPromptSnapshot.EMPTY,
+        /** 红队模式协议全文；空串表示未开启。 */
+        redteamProtocol: String = "",
+        goal: String = "",
+        goalProgress: (() -> GoalProgress?)? = null,
+        /** 与技能提示共用同一注入点：返回非空时作为一条上下文提示进 messages，不进会话 UI。 */
+        taskPlanHint: (() -> String?)? = null,
+        experienceHint: String? = null,
+        /** 本地轮次上限，0 表示不设限；子代理必须显式给值。 */
+        maxRounds: Int = 0,
         onContextSnapshot: (AgentContextSnapshot) -> Unit = {},
         onTranscript: (List<ConversationMessage>) -> Unit = {},
         onEvent: (AgentEvent) -> Unit = {}
@@ -119,11 +139,15 @@ internal object AgentModelClient {
         val initialCapabilities = capabilitiesProvider()
         val messages = AgentPromptBuilder.buildInitialMessages(
             config,
-            prompt,
+            if (experienceHint.isNullOrBlank()) prompt else
+                "$prompt\n\n<local_task_experience>\n$experienceHint\n</local_task_experience>",
             images,
             history,
             skillContext,
             memoryContext,
+            userPrompt = userPrompt,
+            redteamProtocol = redteamProtocol,
+            goal = goal,
             rootAvailable = initialCapabilities.rootAvailable,
             roleplayContext = roleplayContext,
             executionContext = executionContext,
@@ -145,7 +169,7 @@ internal object AgentModelClient {
         val transcript = JSONArray()
         // 旧 history 中的无效消息可能在组装时被跳过，系统边界不能由 history 条数倒推。
         val systemCount = AgentPromptBuilder.buildSystemMessages(
-            config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext, executionContext,
+            config, skillContext, memoryContext, initialCapabilities.rootAvailable, roleplayContext, executionContext, userPrompt,
         ).length()
         fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
             if (rewriteReply) return JSONArray()
@@ -165,7 +189,17 @@ internal object AgentModelClient {
             for (index in 0 until additionalTools.length()) {
                 tools.put(additionalTools.opt(index))
             }
-            return toolFilter?.invoke(tools) ?: tools
+            // 上游的 toolFilter 与本地 allowedToolNames 是两道独立约束，必须都过。
+            val policyFiltered = toolFilter?.invoke(tools) ?: tools
+            if (allowedToolNames == null) return policyFiltered
+            // 过滤后按名字重建：直接把不合法项从原数组剔除更省，但 JSONArray 没有 remove。
+            val filtered = JSONArray()
+            for (index in 0 until policyFiltered.length()) {
+                val item = policyFiltered.optJSONObject(index) ?: continue
+                val name = item.optJSONObject("function")?.optString("name").orEmpty()
+                if (name.isNotEmpty() && name in allowedToolNames) filtered.put(item)
+            }
+            return filtered
         }
         val tools = toolsFor(initialCapabilities)
         onEvent(
@@ -176,6 +210,7 @@ internal object AgentModelClient {
                 terminalTools = config.terminalTools
             )
         )
+        // 运行中的技能提示已停用：它同样是按关键词猜，与"需要时自己 skills_read"相冲突。
         // 工具目录与系统提示都是请求前缀，按轮重算会让一次瞬时状态抖动废掉整段缓存。
         // Root 授权真正变化时整体重建；其余能力只增不减：短暂不可用的工具仍保留，执行时自行报告错误码。
         var promptRootAvailable = initialCapabilities.rootAvailable
@@ -184,7 +219,8 @@ internal object AgentModelClient {
             val capabilities = capabilitiesProvider()
             if (capabilities.rootAvailable != promptRootAvailable) {
                 val systemMessages = AgentPromptBuilder.buildSystemMessages(
-                    config, skillContext, memoryContext, capabilities.rootAvailable, roleplayContext, executionContext,
+                    config, skillContext, memoryContext, capabilities.rootAvailable, roleplayContext,
+                    executionContext, userPrompt, goal, redteamProtocol,
                 )
                 for (index in 0 until systemMessages.length()) {
                     messages.put(index, systemMessages.getJSONObject(index))
@@ -233,7 +269,15 @@ internal object AgentModelClient {
             purpose = if (rewriteReply) ProviderRequestPurpose.REPLY_REWRITE else ProviderRequestPurpose.CHAT,
             roleplayContext = roleplayContext,
             initialSupplementIndex = initialSupplementIndex,
+            goal = goal,
+            goalProgress = goalProgress,
+            maxRounds = maxRounds,
             toolsForRound = ::toolsForRound,
+            onToolResultsHint = if (rewriteReply) null else { toolText ->
+                listOfNotNull(taskPlanHint?.invoke())
+                    .joinToString("\n")
+                    .ifBlank { null }
+            },
         )
         val result = try {
             if (compactOnly) loop.compactOnly() else loop.run()
@@ -315,6 +359,12 @@ internal object AgentModelClient {
         val model: String,
         val modelDisplayName: String = "",
         val contextWindow: Int? = null,
+        /**
+         * 目录/服务商**声明**的窗口（官方目录、社区目录、OpenRouter、provider /models 的
+         * max_input_tokens）。它不作为硬上限——`contextWindow` 仍是唯一可信上限（只认人工覆盖），
+         * 但可以拿来做「提前触发压缩」的参考，避免自动压缩对所有模型都等于关闭。
+         */
+        val declaredContextWindow: Int? = null,
         val systemPrompt: String,
         val anthropicVersion: String = AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION,
         val openAiEndpointMode: String = OpenAiEndpointMode.CHAT_COMPLETIONS,

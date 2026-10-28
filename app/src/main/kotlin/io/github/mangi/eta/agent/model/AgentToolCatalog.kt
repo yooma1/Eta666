@@ -32,12 +32,16 @@ internal object AgentToolCatalog {
                 AgentWebToolCatalog.appendTo(tools, includeSearch = localWebSearch)
                 AgentBrowserToolCatalog.appendTo(tools)
             }
+            AgentReverseToolCatalog.appendTo(tools)
             AgentSkillToolCatalog.appendTo(
                 tools,
                 githubDiscovery = skillGitHubDiscovery,
                 githubInstall = skillGitHubInstall,
             )
-            if (memoryTools) AgentMemoryToolCatalog.appendTo(tools, writable = memoryWritable)
+            if (memoryTools) {
+                AgentMemoryToolCatalog.appendTo(tools, writable = memoryWritable)
+                AgentKnowledgeToolCatalog.appendTo(tools, writable = memoryWritable)
+            }
             if (terminalTools) {
                 AgentFileVisionToolCatalog.appendTo(tools)
                 AgentTerminalToolCatalog.appendTo(tools)

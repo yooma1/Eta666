@@ -10,6 +10,7 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.core.RunPhaseTrace
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
@@ -40,9 +41,13 @@ internal object AgentRuntimeWire {
     const val AGENT_UI_HANDOFF_SOURCE = "agent_ui"
     const val ETA_VOICE_HANDOFF_SOURCE = "eta_voice"
 
-    internal class PayloadTooLargeException(sizeBytes: Int) : IllegalArgumentException(
-        "Agent Runtime 请求元数据过大（$sizeBytes bytes）；请缩短输入或会话历史后重试"
-    )
+    internal class PayloadTooLargeException : IllegalArgumentException {
+        constructor(sizeBytes: Int) : super(
+            "Agent Runtime 请求元数据过大（$sizeBytes bytes）；请缩短输入或会话历史后重试"
+        )
+
+        constructor(message: String) : super(message)
+    }
 
     /** bind 获取服务端 Messenger 的 Intent action。 */
     const val ACTION_BIND = "io.github.mangi.eta.agent.runtime.BIND"
@@ -84,11 +89,27 @@ internal object AgentRuntimeWire {
     /** service -> client：返回是否成功重新订阅指定 run。 */
     const val MSG_ATTACH_RUN_RESPONSE = 12
 
+    /** client -> service：向正在运行的 run 排入一条补充指令（steering）。 */
+    const val MSG_STEER = 13
+
+    /** service -> client：返回该补充指令是否被接受（run 已收尾时会拒绝）。 */
+    const val MSG_STEER_RESPONSE = 14
+
     /** client -> service：枚举已接纳、尚未发布终态的运行。 */
     const val MSG_QUERY_ACTIVE_RUNS = 16
 
     /** service -> client：返回各运行的会话归属与当前阶段。 */
     const val MSG_QUERY_ACTIVE_RUNS_RESPONSE = 17
+
+    // 15 已被 MSG_READ_CONTEXT_RESULT 占用；运行控制码自 18 起，避免与任一侧撞号。
+    /** client -> service：暂停当前 run（在下一个检查点挂起）。 */
+    const val MSG_PAUSE = 18
+
+    /** client -> service：恢复被暂停的 run。 */
+    const val MSG_RESUME = 19
+
+    /** client -> service：放弃当前 run 的持续目标，不再自动续跑。 */
+    const val MSG_CANCEL_GOAL = 20
 
     private const val MODULE_PACKAGE = "io.github.mangi.eta"
     private const val SERVICE_CLASS = "io.github.mangi.eta.agent.runtime.AgentRuntimeService"
@@ -108,8 +129,15 @@ internal object AgentRuntimeWire {
     private const val KEY_MODEL = "model"
     private const val KEY_MODEL_DISPLAY_NAME = "model_display_name"
     private const val KEY_CONTEXT_WINDOW = "context_window"
+    private const val KEY_DECLARED_CONTEXT_WINDOW = "declared_context_window"
     private const val KEY_AUTO_COMPACTION_ENABLED = "auto_compaction_enabled"
     private const val KEY_SYSTEM_PROMPT = "system_prompt"
+
+    /** 跨进程传递的补充指令正文。 */
+    private const val KEY_STEER_TEXT = "steer_text"
+
+    /** 持续目标正文：随 run 请求一次性下发，不落 IPC 之外的任何全局状态。 */
+    private const val KEY_GOAL = "goal_text"
     private const val KEY_ANTHROPIC_VERSION = "anthropic_version"
     private const val KEY_OPENAI_ENDPOINT_MODE = "openai_endpoint_mode"
     private const val KEY_SUPPORTS_SEARCH_SUGGESTIONS = "supports_search_suggestions"
@@ -128,6 +156,7 @@ internal object AgentRuntimeWire {
     private const val KEY_CUSTOM_BODY_JSON = "custom_body_json"
     private const val KEY_IMAGES = "images"
     private const val KEY_HISTORY = "history"
+    private const val KEY_HISTORY_REF = "history_ref"
     private const val KEY_CONTENT_JSON = "content_json"
     private const val KEY_TOOL_CALL_ID = "tool_call_id"
     private const val KEY_TOOL_CALLS_JSON = "tool_calls_json"
@@ -169,11 +198,24 @@ internal object AgentRuntimeWire {
         val config: AgentModelClient.ModelConfig,
         val images: List<AgentModelClient.ModelImage>,
         val history: List<AgentModelClient.ConversationMessage> = emptyList(),
+        /**
+         * 历史改从库里读时的会话 id（同进程 runtime 直接读 context_checkpoint）。
+         *
+         * 之前每次都把整段历史编码成 JSON 跨 binder 传过去，实测 5.7MB 历史要
+         * encode 697ms + 解码 888ms，纯搬运。发送前有 write-ahead 落盘保证，
+         * 库里那份与内存一致，所以只传 id 就够。
+         */
+        val historyRef: String = "",
         val handoff: EntryHandoff? = null,
         val modelSessionId: String = "",
         val operation: String = OP_CHAT,
         val rewriteTargetMessageId: String? = null,
         val assistantScreenContext: String = "",
+        /**
+         * 本次运行要持续追求的目标正文。为空表示没有目标模式；
+         * 非空时 [AgentPromptBuilder] 会把它注入成独立 system 消息，循环也会围绕它续跑。
+         */
+        val goal: String = "",
     ) {
         // 旧入口沿用会话 handoff；无持久会话的入口以首个 run 为会话起点。
         val effectiveModelSessionId: String
@@ -315,7 +357,23 @@ internal object AgentRuntimeWire {
         require(request.assistantScreenContext.length <= AssistantScreenContextProjection.MAX_CHARS) {
             "助理屏幕上下文超过容量预算"
         }
-        AgentWireText.put(this, "history_json", AgentConversationCodec.encodeTranscriptForStorage(request.history), payloadDirectory)
+        // 先估总量再编码：历史一大，"编码成 JSON"这一步本身就可能 OOM，
+        // 用户只会看到「请求发送失败（OutOfMemoryError）」这种无从下手的报错。
+        val historyChars = request.history.sumOf {
+            it.content.length + it.contentJson.length + it.reasoningContent.length + it.toolCallsJson.length
+        }
+        if (historyChars > AgentWireText.MAX_TRANSFER_CHARS) {
+            throw PayloadTooLargeException(
+                "会话历史过大（约 ${historyChars / 1024 / 1024} MB），请先压缩上下文后再发送",
+            )
+        }
+        RunPhaseTrace.markSized("wire.encode", historyChars)
+        if (request.historyRef.isBlank()) {
+            AgentWireText.put(this, "history_json", AgentConversationCodec.encodeTranscriptForStorage(request.history), payloadDirectory)
+        } else {
+            putString(KEY_HISTORY_REF, request.historyRef)
+        }
+        RunPhaseTrace.mark("wire.encoded")
         putString(KEY_RUN_ID, request.runId)
         AgentWireText.put(this, KEY_PROMPT, request.prompt, payloadDirectory)
         putString(KEY_ASSISTANT_SCREEN_CONTEXT, request.assistantScreenContext)
@@ -332,8 +390,10 @@ internal object AgentRuntimeWire {
         putString("operation", request.operation)
         request.rewriteTargetMessageId?.let { putString("rewrite_target_message_id", it) }
         request.config.contextWindow?.let { putInt(KEY_CONTEXT_WINDOW, it) }
+        request.config.declaredContextWindow?.let { putInt(KEY_DECLARED_CONTEXT_WINDOW, it) }
         putBoolean(KEY_AUTO_COMPACTION_ENABLED, request.config.autoCompactionEnabled)
         AgentWireText.put(this, KEY_SYSTEM_PROMPT, request.config.systemPrompt, payloadDirectory)
+        AgentWireText.put(this, KEY_GOAL, request.goal, payloadDirectory)
         putString(KEY_ANTHROPIC_VERSION, request.config.anthropicVersion)
         putString(KEY_OPENAI_ENDPOINT_MODE, request.config.openAiEndpointMode)
         putBoolean(KEY_HOSTED_WEB_SEARCH_ENABLED, request.config.hostedWebSearchEnabled)
@@ -353,19 +413,24 @@ internal object AgentRuntimeWire {
         putString(KEY_CUSTOM_HEADERS_JSON, json.encodeToString(request.config.customHeaders))
         putString(KEY_CUSTOM_BODY_JSON, json.encodeToString(request.config.customBody))
         request.handoff?.let { putBundle(KEY_HANDOFF, toBundle(it)) }
-        putParcelableArrayList(
-            KEY_HISTORY,
-            ArrayList(AgentConversationCodec.decodeTranscript(AgentLegacyConversationProjection.encode(request.history, AgentLegacyConversationProjection.DIRECT_CHARS)).map { message ->
-                Bundle().apply {
-                    putString(KEY_ROLE, message.role)
-                    putString(KEY_CONTENT, message.content)
-                    putString(KEY_CONTENT_JSON, message.contentJson)
-                    putString(KEY_TOOL_CALL_ID, message.toolCallId)
-                    putString(KEY_REASONING_CONTENT, message.reasoningContent)
-                    putString(KEY_TOOL_CALLS_JSON, message.toolCallsJson)
-                }
-            })
-        )
+        // history_json 一旦走文件描述符，接收端（requestFromBundle）永远优先读它，
+        // KEY_HISTORY 这份"旧协议内联预览"必然被丢弃。历史一大，它仍要完整投影
+        // （编码+解码+N 个 Bundle+Parcel 写入）——纯浪费，直接不生成。
+        if (!AgentWireText.hasDescriptor(this, "history_json")) {
+            putParcelableArrayList(
+                KEY_HISTORY,
+                ArrayList(AgentConversationCodec.decodeTranscript(AgentLegacyConversationProjection.encode(request.history, AgentLegacyConversationProjection.DIRECT_CHARS)).map { message ->
+                    Bundle().apply {
+                        putString(KEY_ROLE, message.role)
+                        putString(KEY_CONTENT, message.content)
+                        putString(KEY_CONTENT_JSON, message.contentJson)
+                        putString(KEY_TOOL_CALL_ID, message.toolCallId)
+                        putString(KEY_REASONING_CONTENT, message.reasoningContent)
+                        putString(KEY_TOOL_CALLS_JSON, message.toolCallsJson)
+                    }
+                })
+            )
+        }
         putParcelableArrayList(
             KEY_IMAGES,
             ArrayList(imageBundles)
@@ -450,6 +515,7 @@ internal object AgentRuntimeWire {
             assistantScreenContext = bundle.getString(KEY_ASSISTANT_SCREEN_CONTEXT).orEmpty().also {
                 require(it.length <= AssistantScreenContextProjection.MAX_CHARS) { "助理屏幕上下文超过容量预算" }
             },
+            goal = if (readText) AgentWireText.read(bundle, KEY_GOAL).orEmpty() else "",
             operation = bundle.getString("operation")?.also { require(it in setOf(OP_CHAT, OP_COMPACT, OP_REWRITE_REPLY)) } ?: OP_CHAT,
             rewriteTargetMessageId = bundle.getString("rewrite_target_message_id")?.also {
                 require(it.isNotBlank() && it.length <= 256) { "Invalid rewrite target" }
@@ -469,6 +535,7 @@ internal object AgentRuntimeWire {
                 model = bundle.getString(KEY_MODEL).orEmpty(),
                 modelDisplayName = bundle.getString(KEY_MODEL_DISPLAY_NAME).orEmpty(),
                 contextWindow = bundle.optionalInt(KEY_CONTEXT_WINDOW),
+                declaredContextWindow = bundle.optionalInt(KEY_DECLARED_CONTEXT_WINDOW),
                 autoCompactionEnabled = bundle.getBoolean(
                     KEY_AUTO_COMPACTION_ENABLED,
                     Prefs.Keys.BOOLEAN_DEFAULTS.getValue(Prefs.Keys.AGENT_AUTO_COMPACTION_ENABLED),
@@ -513,6 +580,7 @@ internal object AgentRuntimeWire {
                 customHeaders = decodeCustomHeaders(bundle.getString(KEY_CUSTOM_HEADERS_JSON)),
                 customBody = decodeCustomBody(bundle.getString(KEY_CUSTOM_BODY_JSON))
             ),
+            historyRef = bundle.getString(KEY_HISTORY_REF).orEmpty(),
             history = if (!readText) emptyList() else AgentWireText.read(bundle, "history_json")?.let(AgentConversationCodec::decodeTranscript)
                 ?: bundle.getParcelableArrayList(KEY_HISTORY, Bundle::class.java).orEmpty().map { message ->
                 AgentModelClient.ConversationMessage(
@@ -635,6 +703,21 @@ internal object AgentRuntimeWire {
     fun ackBundle(runId: String): Bundle = Bundle().apply {
         putString(KEY_RUN_ID, runId)
     }
+
+    fun steerBundle(runId: String, text: String): Bundle = Bundle().apply {
+        putString(KEY_RUN_ID, runId)
+        putString(KEY_STEER_TEXT, text)
+    }
+
+    fun steerTextFromBundle(bundle: Bundle): String =
+        bundle.getString(KEY_STEER_TEXT).orEmpty()
+
+    fun steerResponseBundle(runId: String, accepted: Boolean): Bundle = Bundle().apply {
+        putString(KEY_RUN_ID, runId)
+        putBoolean(KEY_OK, accepted)
+    }
+
+    fun steerAcceptedFromBundle(bundle: Bundle): Boolean = bundle.getBoolean(KEY_OK)
 
     fun activeRunsToBundle(runs: List<ActiveRunSnapshot>): Bundle = Bundle().apply {
         putParcelableArrayList("active_runs", ArrayList(runs.map { run ->

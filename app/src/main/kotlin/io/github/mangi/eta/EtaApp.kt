@@ -11,13 +11,23 @@ import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.AnrWatchdog
+import io.github.mangi.eta.core.FileLogSink
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.data.repository.AgentExperienceRepository
+import io.github.mangi.eta.data.repository.AgentKnowledgeRepository
+import io.github.mangi.eta.data.repository.AgentRetainedMemoryRepository
+import io.github.mangi.eta.data.repository.EtaWebDavSyncRepository
+import io.github.mangi.eta.data.repository.EtaWebDavSyncScheduler
+import io.github.mangi.eta.data.repository.AgentGoalRepository
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
+import io.github.mangi.eta.data.repository.AgentUserPromptRepository
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.data.repository.McpServerRepository
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import io.github.mangi.eta.data.repository.ProviderRepository
+import io.github.mangi.eta.data.repository.OpenCodeEmbeddedGateway
 import io.github.mangi.eta.ui.app.PredictiveBackController
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
@@ -27,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import java.io.File
 
 /**
  * 模块 UI 进程的 Application。
@@ -50,15 +61,43 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         if (!AppProcessPolicy.shouldInitializeFullRuntime(Application.getProcessName(), packageName)) {
             return
         }
+        // 日志落盘 + 主线程卡死看门狗：卡死/闪退场景没有 adb 也能拿到证据。
+        FileLogSink.start(File(filesDir, "logs"))
+        installCrashLogger()
+        AnrWatchdog.start()
         TerminalRuntime.initialize(this)
         RootAccess.initialize(this)
         applicationScope.launch { TerminalRuntime.backgroundJobs(this@EtaApp).resume() }
         SettingsDataStore.init(this)
+        OpenCodeEmbeddedGateway.init(this)
         val predictiveBackEnabled = runBlocking(Dispatchers.IO) {
             AppearanceSettingsRepository.settings().predictiveBackEnabled
         }
         PredictiveBackController.apply(applicationInfo, predictiveBackEnabled)
         AgentMemoryRepository.init(this)
+        AgentExperienceRepository.init(this)
+        AgentKnowledgeRepository.init(this)
+        AgentRetainedMemoryRepository.init(this)
+        EtaWebDavSyncRepository.init(this)
+        applicationScope.launch {
+            runCatching {
+                EtaWebDavSyncScheduler.configure(
+                    this@EtaApp, SettingsDataStore.autoWebDavSyncEnabled(),
+                )
+            }
+        }
+        AgentUserPromptRepository.init(this)
+        AgentGoalRepository.init(this)
+        // 首启装配随包破甲记忆。只装一次、失败静默：**装配 ≠ 注入**——
+        // 装好只是让「编辑作战协议」有内容可看，是否注入只看 userPromptEnabled（默认关闭）。
+        applicationScope.launch {
+            runCatching { AgentUserPromptRepository.seedBuiltinIfNeeded() }
+                .onFailure { throwable ->
+                    AndroidAgentLogger.warn(
+                        "Agent user prompt builtin seed failed: type=${throwable.safeLogType()}"
+                    )
+                }
+        }
         ProviderRepository.init(this)
         McpServerRepository.init(this)
         XposedServiceHelper.registerListener(this)
@@ -79,6 +118,18 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
                     "Agent skill index prewarm failed: type=${throwable.safeLogType()}"
                 )
             }
+        }
+    }
+
+    /** 崩溃时把堆栈也写进日志文件，导出后能看到原本只在 logcat 里的 FATAL EXCEPTION。 */
+    private fun installCrashLogger() {
+        val original = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                AndroidAgentLogger.error("未捕获异常 in thread=${thread.name}", throwable)
+                FileLogSink.append("E", "进程即将因未捕获异常退出", throwable)
+            }
+            original?.uncaughtException(thread, throwable)
         }
     }
 

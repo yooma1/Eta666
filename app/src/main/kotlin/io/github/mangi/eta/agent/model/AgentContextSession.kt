@@ -19,6 +19,9 @@ internal class AgentContextSession(
     private val roleplay: Boolean = false,
 ) {
     private val contextWindow = config.knownContextWindow
+
+    /** 目录/服务商声明值：只用于提前触发，不作为硬上限（见 ModelConfig.declaredContextWindow）。 */
+    private val declaredWindow = config.declaredContextWindow?.takeIf { it > 0 }
     private var inputTokens: Int? = null
     private var compacted = false
     private var consumedSupplementCount = 0
@@ -60,16 +63,14 @@ internal class AgentContextSession(
     }
 
     fun compact(force: Boolean = false, final: Boolean = false) {
-        val before = inputTokens
-        if (SignedToolContext.hasPendingResponse(messages)) {
+        val before = effectiveInputTokens()
+        if (config.signedToolRoundLocked(messages)) {
             if (force) {
                 throw SignedToolContext.compactionFailure(messages)
             }
             return
         }
-        if (!force && (!config.autoCompactionEnabled || contextWindow == null || before == null ||
-                before < contextWindow * TRIGGER_RATIO)
-        ) {
+        if (!force && (!config.autoCompactionEnabled || before == null || before < triggerThreshold())) {
             try {
                 publishSnapshot()
             } catch (failure: Exception) {
@@ -119,7 +120,60 @@ internal class AgentContextSession(
         return AgentConversationCodec.transcript(durable, 0, sensitiveIds())
     }
 
+    /**
+     * 触发判定用的输入量：provider 回报优先。
+     *
+     * **没有硬上限**时（人工覆盖缺失，目录声明值也不可靠）退化为按消息体积估算，
+     * 否则换到这类模型后自动压缩会被整体关闭、只能撞服务端上限。
+     * 有硬上限但 provider 不回报 usage 时维持旧语义（不主动压缩），避免无依据地改写用户上下文。
+     */
+    private fun effectiveInputTokens(): Int? {
+        // 有窗口时优先用 provider 回报的用量；没回报就按体积估算。
+        // 原先"配了窗口且无 usage 就返回 null"会让 before 恒为 null，
+        // 触发条件里 before == null 直接成立 → 自动压缩永不触发，只能人工强制压缩。
+        // 窗口未知时反过来不采信 usage（无从校验口径，曾出现报 10M 的假值），
+        // 统一按体积估算，与 triggerThreshold 的保守假定窗口配套。
+        if (contextWindow == null) return estimatedTokens()
+        return inputTokens ?: estimatedTokens()
+    }
+
+    /**
+     * 逐条累加估算，绝不 `messages.toString()`：
+     * 后者每轮都会把整段对话物化成一个巨字符串（历史大时可达数百 MB），
+     * 而这个估算有可能每一轮都跑一次——是"继续对话卡死"的直接来源之一。
+     */
+    private fun estimatedTokens(): Int {
+        var chars = 0
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            chars += message.optString("content").length +
+                message.optString("reasoning_content").length +
+                message.optString("tool_calls").length +
+                FIELD_OVERHEAD_CHARS
+        }
+        return chars / CHARS_PER_TOKEN_ESTIMATE
+    }
+
+    /**
+     * 触发阈值。人工覆盖的窗口是硬上限（85%）；只有目录声明值时按更大的余量提前压缩——
+     * 声明数字不可信，宁可早压也不撞服务端上限；两者都没有才退回保守假定窗口。
+     */
+    private fun triggerThreshold(): Int = when {
+        contextWindow != null -> (contextWindow * TRIGGER_RATIO).toInt()
+        declaredWindow != null -> (declaredWindow * ADVISORY_TRIGGER_RATIO).toInt()
+        else -> (FALLBACK_CONTEXT_WINDOW * TRIGGER_RATIO).toInt()
+    }
+
     private companion object {
         const val TRIGGER_RATIO = 0.85
+
+        /** 目录声明值可信度低于人工覆盖，留足 40% 余量。 */
+        const val ADVISORY_TRIGGER_RATIO = 0.6
+
+        /** 窗口未知时的保守假定窗口：宁可提前压缩，也不要撞服务端硬上限。 */
+        const val FALLBACK_CONTEXT_WINDOW = 32_000
+        const val CHARS_PER_TOKEN_ESTIMATE = 4
+        /** 每条消息的 JSON 键名与结构开销估计。 */
+        const val FIELD_OVERHEAD_CHARS = 64
     }
 }

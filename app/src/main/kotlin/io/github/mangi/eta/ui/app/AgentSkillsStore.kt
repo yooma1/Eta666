@@ -7,6 +7,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.skill.ReverseSkillCatalog
+import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.ui.model.AgentSkillsUiState
 import io.github.mangi.eta.ui.model.SkillItemUi
@@ -69,7 +71,15 @@ internal class AgentSkillsStore(
                 )
             }
             withContext(Dispatchers.Main) {
-                skillsState = skillsState.copy(skills = items, isLoading = false)
+                // 开关是持久化状态，不从"是否全部启用"反推：逆向集合有两百个且每天增加，
+                // 反推只要差一个就永远显示关闭，用户会以为开关坏了。
+                val bundleEnabled = runCatching { SettingsDataStore.reverseBundleEnabled() }
+                    .getOrDefault(false)
+                skillsState = skillsState.copy(
+                    skills = items,
+                    isLoading = false,
+                    reverseModeEnabled = bundleEnabled,
+                )
             }
         }
     }
@@ -85,6 +95,40 @@ internal class AgentSkillsStore(
                 skillsState = skillsState.copy(
                     busySkillId = null,
                     notice = if (succeeded) {
+                        skillsState.notice
+                    } else {
+                        newSkillNotice(
+                            title = appContext.getString(R.string.state_unable_to_update_skills_04e56c),
+                            message = appContext.getString(R.string.state_the_skill_switch_has_not_changed_please_try_again_la_fa262f),
+                            isError = true,
+                        )
+                    },
+                )
+            }
+            refreshSkills()
+        }
+    }
+
+    /** 逆向模式总开关：一键启停全部逆向类技能（fork 功能，随上游重构移植到 Store）。 */
+    fun toggleReverseMode(enabled: Boolean) {
+        if (skillsState.isImporting || skillsState.busySkillId != null) return
+        skillsState = skillsState.copy(busySkillId = REVERSE_MODE_BUSY_ID)
+        scope.launch(Dispatchers.IO) {
+            val indexService = SkillRuntime.createIndexService(appContext)
+            // 先落开关状态，再批量启停：中途失败也不会出现"技能改了、开关没改"的错位。
+            runCatching { SettingsDataStore.setReverseBundleEnabled(enabled) }
+            val targets = skillsState.skills.filter {
+                it.installed && ReverseSkillCatalog.isReverse(it.id)
+            }
+            var allSucceeded = true
+            for (skill in targets) {
+                val ok = runCatching { indexService.setSkillEnabled(skill.id, enabled) }.isSuccess
+                if (!ok) allSucceeded = false
+            }
+            withContext(Dispatchers.Main) {
+                skillsState = skillsState.copy(
+                    busySkillId = null,
+                    notice = if (allSucceeded) {
                         skillsState.notice
                     } else {
                         newSkillNotice(
@@ -382,4 +426,8 @@ internal class AgentSkillsStore(
 
     private fun String.safeSkillDisplayName(): String =
         lineSequence().firstOrNull().orEmpty().trim().ifBlank { appContext.getString(R.string.state_ui_unnamed_skill_a58008) }.take(80)
+
+    private companion object {
+        const val REVERSE_MODE_BUSY_ID = "__reverse_mode__"
+    }
 }

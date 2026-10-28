@@ -32,6 +32,8 @@ import io.github.mangi.eta.agent.skill.SkillIndexService
 import io.github.mangi.eta.agent.skill.SkillInstallErrorCode
 import io.github.mangi.eta.agent.skill.SkillInstallResult
 import io.github.mangi.eta.agent.skill.SkillLoader
+import io.github.mangi.eta.agent.skill.SkillTriggerMatcher
+import io.github.mangi.eta.agent.skill.SkillUsageStats
 import io.github.mangi.eta.agent.skill.SkillPackageInstaller
 import io.github.mangi.eta.agent.skill.SkillParser
 import io.github.mangi.eta.agent.skill.SkillResourceReader
@@ -53,6 +55,7 @@ import io.github.mangi.eta.core.HookSupport
 import io.github.mangi.eta.data.repository.AgentMemoryException
 import io.github.mangi.eta.data.repository.AgentMemoryMutation
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
+import io.github.mangi.eta.data.repository.AgentKnowledgeRepository
 import io.github.mangi.eta.data.repository.AgentMemoryWriteResult
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
 import io.github.mangi.eta.data.repository.WebToolsSettingsRepository
@@ -143,7 +146,7 @@ internal class AgentLocalTools(
         ),
         linuxSharedMountsProvider = { SharedFolderMounts.current() },
     )
-
+    private val reverseTools = AgentReverseTools(rootCommandExecutor, terminalController)
     private val publishedObservation = AtomicReference(PublishedObservation())
     private val runAvailableSkillIds = runAvailableSkillIds
         .mapTo(mutableSetOf(), SkillParser::normalizeSkillLookup)
@@ -266,15 +269,34 @@ internal class AgentLocalTools(
                         ?: textResult(errorResult("UNKNOWN_TOOL", "未知设备工具"))
                 "read_image" -> fileVisionTool { imageTools.readImage(args) }
                 in AgentTerminalToolCatalog.names -> textResult(terminalTool {
-                    if (toolCall.name == "terminal" && args.optString("action").equals("check_root", ignoreCase = true)) checkRoot()
+                    // 旋转是用户的显示偏好，任何路径都不许改：set_setting 已经从白名单移除，
+                    // 这里再堵住 shell——否则 `settings put system accelerometer_rotation 1` 照样能开。
+                    if (toolCall.name == "terminal" && touchesRotationSetting(args.optString("command"))) {
+                        errorResult(
+                            "ROTATION_PROTECTED",
+                            "自动旋转属于用户自己的显示偏好，不允许由 agent 修改。需要读取状态请用 get_setting(target=auto_rotate)。",
+                        )
+                    } else if (toolCall.name == "terminal" && args.optString("action").equals("check_root", ignoreCase = true)) checkRoot()
                     else terminalController.executeTool(toolCall.name, args)
                 })
                 in AgentFileToolCatalog.names -> textResult(terminalTool { terminalController.fileTool(toolCall.name, args) })
+                "process_list" -> textResult(terminalTool { reverseTools.processList(args) })
+                "mem_read" -> textResult(terminalTool { reverseTools.memRead(args) })
+                "mem_search" -> textResult(terminalTool { reverseTools.memSearch(args) })
+                "mem_write" -> textResult(terminalTool { reverseTools.memWrite(args) })
+                "frida_ps" -> textResult(terminalTool { reverseTools.fridaPs(args) })
+                "frida_script" -> textResult(terminalTool { reverseTools.fridaScript(args) })
+                "mcp_call" -> textResult(terminalTool { reverseTools.mcpCall(args) })
                 "memory_get" -> textResult(memoryGet(args))
                 "memory_write" -> textResult(memoryWrite(args))
+                "knowledge_search" -> textResult(knowledgeSearch(args))
+                "knowledge_get" -> textResult(knowledgeGet(args))
+                "knowledge_save" -> textResult(knowledgeSave(args))
+                "knowledge_delete" -> textResult(knowledgeDelete(args))
                 "skills_list" -> textResult(skillsList(args))
                 "skills_read" -> textResult(skillsRead(args))
                 "skills_read_resource" -> textResult(skillsReadResource(args))
+                "skills_suggest" -> textResult(skillsSuggest(args))
                 "skills_list_curated" -> textResult(skillsListCurated())
                 "skills_inspect_github" -> textResult(skillsInspectGitHub(args))
                 "skills_install_from_github" -> textResult(skillsInstallFromGitHub(args))
@@ -354,7 +376,7 @@ internal class AgentLocalTools(
     }
 
     private fun memoryToolPermissionError(toolName: String): AgentModelClient.ToolResult? {
-        if (toolName == "memory_write" && !memoryWritable) {
+        if (toolName in setOf("memory_write", "knowledge_save", "knowledge_delete") && !memoryWritable) {
             return AgentModelClient.ToolResult(
                 content = errorResult("REAL_MEMORY_READ_ONLY", "角色会话的现实记忆只读；剧情请使用角色记忆工具"),
                 sensitive = true,
@@ -387,6 +409,49 @@ internal class AgentLocalTools(
     } catch (failure: AgentMemoryException) {
         errorResult(failure.code, failure.message ?: "记忆读取失败")
     }
+
+    private fun knowledgeSearch(args: JSONObject): String {
+        val query = args.getString("query").trim()
+        require(query.isNotBlank() && query.length <= 300)
+        val matches = AgentKnowledgeRepository.search(query, args.optInt("limit", 5))
+        return JSONObject().put("ok", true).put("total", matches.size)
+            .put("items", JSONArray().also { arr ->
+                matches.forEach { note ->
+                    arr.put(JSONObject()
+                        .put("id", note.id).put("revision", note.revision)
+                        .put("title", note.title).put("kind", note.kind)
+                        .put("source", note.source).put("updated_at", note.updatedAt)
+                        .put("excerpt", note.content.take(650)))
+                }
+            }).toString()
+    }
+
+    private fun knowledgeGet(args: JSONObject): String {
+        val id = args.getString("id")
+        val note = AgentKnowledgeRepository.get(id)
+            ?: return errorResult("KNOWLEDGE_NOT_FOUND", "没有找到知识条目")
+        return JSONObject().put("ok", true).put("document", note.json()).toString()
+    }
+
+    private fun knowledgeSave(args: JSONObject): String {
+        val tags = args.optJSONArray("tags")?.let { arr ->
+            (0 until arr.length()).map { arr.getString(it) }
+        }.orEmpty()
+        val result = AgentKnowledgeRepository.save(
+            title = args.getString("title"), content = args.getString("content"),
+            kind = args.optString("kind").ifBlank { "reference" },
+            source = args.optString("source"), tags = tags,
+            id = args.optString("id").takeIf { it.isNotBlank() },
+            revision = args.optString("revision").takeIf { it.isNotBlank() },
+        )
+        return JSONObject().put("ok", true).put("id", result.id)
+            .put("revision", result.revision).put("updated_at", result.updatedAt).toString()
+    }
+
+    private fun knowledgeDelete(args: JSONObject): String =
+        JSONObject().put("ok", AgentKnowledgeRepository.delete(
+            args.getString("id"), args.getString("revision"),
+        )).toString()
 
     private fun memoryWrite(args: JSONObject): String = try {
         val revision = args.getString("revision")
@@ -1049,6 +1114,8 @@ internal class AgentLocalTools(
         if (!compat.available) return errorResult("INCOMPATIBLE", compat.reason ?: "当前环境不可用")
         val resolved = loader.load(entry, "agent 主动读取 skill")
             ?: return errorResult("READ_FAILED", "读取 SKILL.md 失败：${entry.skillFilePath}")
+        // 使用反馈：记录被实际读取的技能，供后续触发打分温和加权（本地统计）。
+        SkillUsageStats.recordRead(context.filesDir, entry.id)
         val body = if (resolved.bodyMarkdown.length <= maxChars) {
             resolved.bodyMarkdown
         } else {
@@ -1070,6 +1137,51 @@ internal class AgentLocalTools(
             .put("references", references)
             .put("frontmatter", frontmatter)
             .put("bodyMarkdown", body)
+            .toString()
+    }
+
+    /**
+     * skills_suggest：把自由文本（当前子任务/新出现的信号）与已启用技能做打分匹配，
+     * 返回最相关的技能 id + 描述，供模型在长回答中途主动、反复地精准选取技能。
+     */
+    private fun skillsSuggest(args: JSONObject): String {
+        if (skillTreeMutationUncertain.get()) return nextTurnRequired("Skill 树")
+        val indexService = skillIndexService
+            ?: return errorResult("SKILLS_UNAVAILABLE", "技能服务未初始化")
+        val query = args.optString("query").trim()
+        if (query.isBlank()) return errorResult("MISSING_PARAM", "缺少 query")
+        val limit = args.optInt("limit", SkillTriggerMatcher.MAX_CANDIDATES).coerceIn(1, 20)
+        val skills = indexService.listInstalledSkills()
+            .filter { isVisibleInCurrentRun(it.id) && SkillCompatibilityChecker.evaluate(it).available }
+        if (skills.isEmpty()) return errorResult("SKILLS_UNAVAILABLE", "当前没有可用技能")
+        val input = SkillTriggerMatcher.Input(
+            text = query,
+            extensions = SkillTriggerMatcher.detectExtensions(query),
+        )
+        val matches = JSONArray()
+        SkillTriggerMatcher.rankScored(input, skills, maxResults = limit).forEach { scored ->
+            matches.put(
+                JSONObject()
+                    .put("id", scored.skill.id)
+                    .put("name", scored.skill.name)
+                    .put("description", scored.skill.description.take(200))
+                    .put("skillFilePath", scored.skill.skillFilePath)
+                    .put("score", scored.score),
+            )
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("query", query)
+            .put("count", matches.length())
+            .put("matches", matches)
+            .put(
+                "hint",
+                if (matches.length() == 0) {
+                    "没有明显相关的技能；可直接用通用能力继续。"
+                } else {
+                    "挑最相关的 1-2 个用 skills_read 读取正文后再执行。"
+                },
+            )
             .toString()
     }
 
@@ -1426,6 +1538,16 @@ internal class AgentLocalTools(
         errorResult(failure.code, failure.message ?: "GitHub Skill 请求失败")
     }
 
+    /**
+     * 命令里出现旋转设置就算触碰，读也一并拒绝——读状态有 `get_setting`，不需要 shell。
+     * 只做子串匹配、不做 shell 解析：多一层解析就多一个绕过口子。
+     */
+    private fun touchesRotationSetting(command: String): Boolean {
+        if (command.isBlank()) return false
+        val text = command.lowercase()
+        return text.contains("accelerometer_rotation") || text.contains("user_rotation")
+    }
+
     private fun errorResult(code: String, message: String): String =
         JSONObject()
             .put("ok", false)
@@ -1535,7 +1657,10 @@ internal class AgentLocalTools(
         val DEVICE_TOOL_NAMES =
             DEVICE_DIRECT_TOOL_NAMES + DEVICE_SENSITIVE_READ_TOOL_NAMES +
                 DEVICE_SENSITIVE_ACTION_TOOL_NAMES
-        val MEMORY_TOOL_NAMES = setOf("memory_get", "memory_write")
+        val MEMORY_TOOL_NAMES = setOf(
+            "memory_get", "memory_write",
+            "knowledge_search", "knowledge_get", "knowledge_save", "knowledge_delete",
+        )
     }
 }
 
