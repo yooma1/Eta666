@@ -584,6 +584,9 @@ private fun PendingImageStrip(
     onRemoveImage: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 60dp 的缩略图看不清内容，点一下给全屏大图；删除按钮盖在右上角，先吃到点击。
+    var viewedImage by remember { mutableStateOf<String?>(null) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -596,7 +599,8 @@ private fun PendingImageStrip(
                 modifier = Modifier
                     .size(60.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(MiuixTheme.colorScheme.surfaceContainer),
+                    .background(MiuixTheme.colorScheme.surfaceContainer)
+                    .clickable(interactionSource = null, indication = null) { viewedImage = image.dataUrl },
             ) {
                 rememberDataUrlBitmap(image.dataUrl)?.let { bitmap ->
                     Image(
@@ -633,4 +637,6 @@ private fun PendingImageStrip(
             }
         }
     }
+
+    ImageViewerDialog(dataUrl = viewedImage, onDismiss = { viewedImage = null })
 }

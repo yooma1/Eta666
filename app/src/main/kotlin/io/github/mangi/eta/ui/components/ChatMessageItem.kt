@@ -405,24 +405,7 @@ private fun UserMessageBubble(
                     ),
             ) {
                 if (message.images.isNotEmpty()) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    ) {
-                        message.images.forEach { dataUrl ->
-                            val bitmap = rememberDataUrlBitmap(dataUrl)
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = stringResource(R.string.chat_image_attachment),
-                                    modifier = Modifier
-                                        .size(100.dp)
-                                        .clip(RoundedCornerShape(12.dp)),
-                                    contentScale = ContentScale.Crop,
-                                )
-                            }
-                        }
-                    }
+                    MessageImageRow(images = message.images)
                 }
                 if (visiblePrompt.references.isNotEmpty()) {
                     SentFileReferenceFlow(
@@ -1174,4 +1157,35 @@ private fun SuggestionChipsRow(
             }
         }
     }
+}
+
+/**
+ * 消息里的附图：100dp 缩略图，点开看原图。
+ *
+ * 状态放在这里而不是提到 ChatMessageItem 顶层：一个消息可能有多张图，各自点开时
+ * 需要知道「点的是哪一张」，而这个状态只被这一行用，提上去只会让参数变长。
+ */
+@Composable
+private fun MessageImageRow(images: List<String>) {
+    var viewedImage by remember { mutableStateOf<String?>(null) }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.padding(bottom = 8.dp),
+    ) {
+        images.forEach { dataUrl ->
+            val bitmap = rememberDataUrlBitmap(dataUrl)
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = stringResource(R.string.chat_image_attachment),
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(interactionSource = null, indication = null) { viewedImage = dataUrl },
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+    }
+    ImageViewerDialog(dataUrl = viewedImage, onDismiss = { viewedImage = null })
 }
