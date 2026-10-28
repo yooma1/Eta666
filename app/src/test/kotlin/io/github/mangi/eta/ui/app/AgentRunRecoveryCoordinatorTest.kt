@@ -80,13 +80,13 @@ class AgentRunRecoveryCoordinatorTest {
             completedRuns = emptyList(),
             activeStateKnown = false,
             terminalStateKnown = false,
-            activeRunId = null,
-            locallyObservedRunId = "run-local",
+            activeRunIds = emptySet(),
+            locallyObservedRunIds = setOf("run-local"),
             treatUnknownAsInterrupted = true,
         )
 
         assertEquals(listOf("run-stale"), plan.interrupted.map { it.runId })
-        assertNull(plan.reattach)
+        assertTrue(plan.reattach.isEmpty())
     }
 
     @Test

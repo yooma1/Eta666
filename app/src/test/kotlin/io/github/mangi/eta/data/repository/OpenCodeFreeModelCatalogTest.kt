@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Test
 
 class OpenCodeFreeModelCatalogTest {
@@ -69,30 +70,17 @@ class OpenCodeFreeModelCatalogTest {
         assertTrue(OpenCodeFreeModelCatalog.parseFreeModelIds(json).isEmpty())
     }
 
-    @Test fun builtinZenCatalogDoesNotWaitForEmbeddedGatewayReadiness() {
-        // The on-device gateway is enabled by default. A *public* catalog must
-        // still be fetched through Zen rather than gated on /healthz status.
+    @Test fun officialOpenCodeUrlIsIdentifiedAndCustomGatewaysAreNot() {
+        // 原 builtinZenCatalogDoesNotWaitForEmbeddedGatewayReadiness /
+        // customOpenCodeGatewayDoesNotSilentlyRedirectToOfficialZen 依赖的
+        // RemoteModelFetcher.shouldReadOfficialZenCatalog 与 catalogProvider 已在上游移除，
+        // 这里保留仍存在的那部分契约：官方 Zen URL 可识别、第三方 URL 不被误判。
         val builtin = BuiltinProviders.providerById(BuiltinProviders.OPENCODE_ID)!!
-        assertTrue(OpenCodeFreeModelCatalog.identifyOfficialOpenCodeUrl(builtin.baseUrl))
-        assertTrue(RemoteModelFetcher.shouldReadOfficialZenCatalog(builtin))
-        assertEquals(builtin, RemoteModelFetcher.catalogProvider(builtin))
         assertEquals("https://opencode.ai/zen/v1", builtin.baseUrl)
-    }
-
-    @Test fun customOpenCodeGatewayDoesNotSilentlyRedirectToOfficialZen() {
-        val custom = OpenAiCompatibleProviderSetting(
-            id = "custom-local",
-            name = "Private OpenCode",
-            baseUrl = "https://custom.example.net/v1",
-            sourceType = ProviderSourceTypes.OPENCODE,
+        assertTrue(OpenCodeFreeModelCatalog.identifyOfficialOpenCodeUrl(builtin.baseUrl))
+        assertFalse(
+            OpenCodeFreeModelCatalog.identifyOfficialOpenCodeUrl("https://other-provider.example/zen/v1"),
         )
-        assertFalse(RemoteModelFetcher.shouldReadOfficialZenCatalog(custom))
-        assertFalse(RemoteModelFetcher.shouldReadOfficialZenCatalog(
-            BuiltinProviders.providerById(BuiltinProviders.DEEPSEEK_ID)!!,
-        ))
-        assertFalse(OpenCodeFreeModelCatalog.identifyOfficialOpenCodeUrl(
-            "https://other-provider.example/zen/v1",
-        ))
     }
 
     @Test fun currentOfficialStyleModelListImportsFreeChatModelsOnly() {

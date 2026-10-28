@@ -75,6 +75,15 @@ jobs:
           chmod +x gradlew
           ./gradlew --version || true
 
+      # 全量单测在这条基线上有 544 条既有红（AgentRuntimeWireTest 等，与本仓库改动无关），
+      # 所以 CI 只跑本次合并的 Subagent 子系统用例，保证「新增代码有回归」而不被旧红卡住。
+      - name: Unit tests (subagent)
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --no-configuration-cache :app:testDebugUnitTest \
+            --tests "io.github.mangi.eta.agent.subagent.*" --stacktrace 2>&1 \
+            | tee "$RUNNER_TEMP/test.log"
+
       - name: Build debug APK
         if: inputs.build_type != 'release'
         run: |
@@ -106,7 +115,8 @@ jobs:
         if: failure()
         run: |
           log="$RUNNER_TEMP/build.log"
-          if [ ! -f "$log" ]; then echo "::error::没有 build.log，构建可能没进到编译阶段"; exit 0; fi
+          if [ ! -f "$log" ]; then log="$RUNNER_TEMP/test.log"; fi
+          if [ ! -f "$log" ]; then echo "::error::既没有 build.log 也没有 test.log，可能没进到编译阶段"; exit 0; fi
           reason="$(awk '/What went wrong/{flag=1} flag{print} /^\* Try:/{if(flag) exit}' "$log" | head -40)"
           if [ -z "$reason" ]; then
             reason="$(grep -nE '^e: |error:|Caused by:|Execution failed|> Task .* FAILED' "$log" | head -20)"
@@ -121,15 +131,17 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-log
-          path: ${{ runner.temp }}/build.log
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/test.log
           if-no-files-found: ignore
 
       - name: Upload debug APK
         if: inputs.build_type != 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Eta-debug
           path: app/build/outputs/apk/debug/*.apk
@@ -137,7 +149,7 @@ jobs:
 
       - name: Upload release APK
         if: inputs.build_type == 'release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Eta-release
           path: app/build/outputs/apk/release/*.apk
