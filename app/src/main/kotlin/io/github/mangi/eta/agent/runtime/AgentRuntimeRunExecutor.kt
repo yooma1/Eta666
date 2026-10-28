@@ -674,7 +674,20 @@ internal class AgentRuntimeRunExecutor(
                                 // 子代理运行在非 suspend 的工具回调里，这里用 runBlocking 取一次配置。
                                 runBlocking { RuntimeConfigRepository.runtimeConfigFor(subagentModelId) }
                             }.getOrNull()
-                                ?.copy(systemPrompt = baseSubagentConfig.systemPrompt)
+                                // 只换模型身份，能力开关必须继承主会话：buildRuntimeConfig 不设这些位，
+                                // 直接用它会让子代理拿到 terminalTools=false 的空工具表（实测踩过：
+                                // 配了「Subagent 模型」后，coder 子代理连 terminal 都没有）。
+                                ?.copy(
+                                    terminalTools = baseSubagentConfig.terminalTools,
+                                    browserTools = baseSubagentConfig.browserTools,
+                                    deviceDirectTools = baseSubagentConfig.deviceDirectTools,
+                                    deviceSensitiveReadTools = baseSubagentConfig.deviceSensitiveReadTools,
+                                    deviceSensitiveActionTools = baseSubagentConfig.deviceSensitiveActionTools,
+                                    thinkingEnabled = baseSubagentConfig.thinkingEnabled,
+                                    reasoningEffort = baseSubagentConfig.reasoningEffort,
+                                    autoCompactionEnabled = baseSubagentConfig.autoCompactionEnabled,
+                                    systemPrompt = baseSubagentConfig.systemPrompt,
+                                )
                                 ?: baseSubagentConfig
                         }
                         val reasoningOverride = ReasoningEffort.fromWireValue(
