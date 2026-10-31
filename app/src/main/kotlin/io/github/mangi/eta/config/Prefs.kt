@@ -51,6 +51,7 @@ internal object Prefs {
         const val AGENT_AUTO_COMPACTION_ENABLED = "agent_auto_compaction_enabled"
         const val AGENT_SUBAGENT_ENABLED = "agent_subagent_enabled"
         const val AGENT_REFUSAL_FAILOVER_ENABLED = "agent_refusal_failover_enabled"
+        const val AGENT_VIRTUAL_DISPLAY_ENABLED = "agent_virtual_display_enabled"
         const val AGENT_RUNTIME_CONFIG_JSON = "agent_runtime_config_json"
 
         /** 新会话是否自动带上上次使用的角色设定。 */
@@ -80,6 +81,7 @@ internal object Prefs {
             AGENT_AUTO_COMPACTION_ENABLED to true,
             AGENT_SUBAGENT_ENABLED to true,
             AGENT_REFUSAL_FAILOVER_ENABLED to true,
+            AGENT_VIRTUAL_DISPLAY_ENABLED to true,
             AGENT_ROLEPLAY_DEFAULT to true,
         )
 
@@ -94,6 +96,7 @@ internal object Prefs {
             AGENT_THINKING_ENABLED,
             AGENT_AUTO_COMPACTION_ENABLED,
             AGENT_SUBAGENT_ENABLED,
+            AGENT_VIRTUAL_DISPLAY_ENABLED,
         )
     }
 

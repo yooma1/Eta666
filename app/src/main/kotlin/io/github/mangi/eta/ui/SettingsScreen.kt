@@ -372,18 +372,6 @@ private fun SettingsPageContent(
 
                     EtaPreferenceDivider()
                     EtaArrowPreference(
-                        title = "Subagent",
-                        startAction = {
-                            EtaPreferenceIcon(
-                                icon = Icons.Rounded.Hub,
-                                tint = EtaPreferenceColors.Blue,
-                            )
-                        },
-                        onClick = { onNavigate(AppRoute.Subagents) },
-                    )
-
-                    EtaPreferenceDivider()
-                    EtaArrowPreference(
                         title = stringResource(R.string.route_skills),
                         startAction = {
                             EtaPreferenceIcon(
@@ -461,6 +449,16 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.WebToolsSettings) },
+                    )
+
+                    EtaPreferenceDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_virtual_display_title),
+                        key = Prefs.Keys.AGENT_VIRTUAL_DISPLAY_ENABLED,
+                        icon = Icons.Rounded.Layers,
+                        iconTint = EtaPreferenceColors.Blue,
                     )
 
                     EtaPreferenceDivider()
