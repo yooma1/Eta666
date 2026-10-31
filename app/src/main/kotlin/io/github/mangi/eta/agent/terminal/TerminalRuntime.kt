@@ -47,6 +47,7 @@ internal object TerminalRuntime {
     val rootAvailable: Boolean get() = RootAccess.isGranted
     val publicStorageGranted: Boolean get() = appContext != null && android.os.Environment.isExternalStorageManager()
     val nativeLibraryDir: File? get() = appContext?.applicationInfo?.nativeLibraryDir?.let(::File)
+    val privateFilesDir: File? get() = appContext?.filesDir
     val userWorkspacePath: String get() = appContext?.let {
         TerminalPrivateStorage.workspace(it.filesDir).absolutePath
     } ?: File(System.getProperty("java.io.tmpdir"), "eta-terminal-workspace").absolutePath

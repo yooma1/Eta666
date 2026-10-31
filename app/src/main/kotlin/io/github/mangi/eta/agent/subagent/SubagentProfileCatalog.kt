@@ -34,7 +34,7 @@ internal object SubagentProfileCatalog {
         SubagentProfile.BUILTIN_PROFILES.forEach { profile ->
             merged[profile.name] = profile
         }
-        discoverCustomProfiles(agentsDir).forEach { custom ->
+        discoverCustomProfilesWithLegacy(agentsDir).forEach { custom ->
             val existing = merged[custom.name]
             if (existing != null && existing.builtin && !custom.override) {
                 return@forEach
@@ -45,7 +45,25 @@ internal object SubagentProfileCatalog {
     }
 
     fun listCustom(agentsDir: File = defaultAgentsDir()): List<SubagentProfile> =
-        discoverCustomProfiles(agentsDir)
+        discoverCustomProfilesWithLegacy(agentsDir)
+
+    /**
+     * 旧版本把工作区直接放在 filesDir 下（agents/ 就在 filesDir 根），
+     * 现在工作区下沉到 terminal-user/workspace 后，老 profile 会变成孤儿文件。
+     * 这里做只读回退：主目录优先，旧目录只补缺，不改动任何文件。
+     */
+    private fun legacyAgentsDirs(agentsDir: File): List<File> {
+        val filesRoot = TerminalRuntime.privateFilesDir ?: return emptyList()
+        return listOf(filesRoot, File(filesRoot, "terminal"), File(filesRoot, "terminal-user"))
+            .map { File(it, "agents") }
+            .filter { it.absolutePath != agentsDir.absolutePath && it.isDirectory }
+    }
+
+    private fun discoverCustomProfilesWithLegacy(agentsDir: File): List<SubagentProfile> =
+        (listOf(agentsDir) + legacyAgentsDirs(agentsDir))
+            .flatMap { discoverCustomProfiles(it) }
+            .distinctBy { it.name }
+            .sortedBy { it.name }
 
     fun get(name: String, agentsDir: File = defaultAgentsDir()): SubagentProfile? {
         val normalized = name.trim().lowercase()
