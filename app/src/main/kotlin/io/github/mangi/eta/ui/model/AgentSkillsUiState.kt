@@ -11,7 +11,7 @@ data class AgentSkillsUiState(
     val replacement: SkillReplacementUi? = null,
     val notice: SkillNoticeUi? = null,
     /** 逆向模式主开关状态——已安装的逆向类技能全部启用时为 true。 */
-    val reverseModeEnabled: Boolean = false,
+    val reverseModeEnabled: Boolean = true,
 )
 
 @Immutable

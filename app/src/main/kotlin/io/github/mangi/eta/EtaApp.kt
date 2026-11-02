@@ -14,6 +14,7 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.AnrWatchdog
 import io.github.mangi.eta.core.FileLogSink
 import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.agent.skill.ReverseSkillCatalog
 import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.repository.AgentExperienceRepository
 import io.github.mangi.eta.data.repository.AgentKnowledgeRepository
@@ -118,7 +119,28 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
                     "Agent skill index prewarm failed: type=${throwable.safeLogType()}"
                 )
             }
+            runCatching { ensureReverseBundleDefaultOn() }
+                .onFailure { throwable ->
+                    AndroidAgentLogger.warn(
+                        "Reverse bundle default-on migration failed: type=${throwable.safeLogType()}"
+                    )
+                }
         }
+    }
+
+    /**
+     * 逆向能力（逆向技能 / 作战协议 / 破甲记忆，同一开关）默认开启。
+     *
+     * 只做一次性迁移：把总开关与逆向类技能打开后落标记，之后用户在设置里关掉即保持关闭。
+     */
+    private suspend fun ensureReverseBundleDefaultOn() {
+        if (SettingsDataStore.reverseBundleDefaultOnApplied()) return
+        SettingsDataStore.setReverseBundleEnabled(true)
+        val index = SkillRuntime.createIndexService(this)
+        index.listSkillsForManagement(forceRefresh = true)
+            .filter { it.installed && !it.enabled && ReverseSkillCatalog.isReverse(it.id) }
+            .forEach { entry -> index.setSkillEnabled(entry.id, true) }
+        SettingsDataStore.setReverseBundleDefaultOnApplied(true)
     }
 
     /** 崩溃时把堆栈也写进日志文件，导出后能看到原本只在 logcat 里的 FATAL EXCEPTION。 */

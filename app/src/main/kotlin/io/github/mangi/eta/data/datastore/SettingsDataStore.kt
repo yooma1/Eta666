@@ -108,8 +108,12 @@ internal object SettingsDataStore {
     private val WEB_DAV_AUTO_SYNC_ENABLED = booleanPreferencesKey("webdav_auto_sync_enabled")
     private val USER_PROMPT_MODE = stringPreferencesKey("user_prompt_mode")
 
-    /** 逆向能力总开关；缺省关闭，与既有默认值一致。 */
+    /** 逆向能力总开关；缺省开启。 */
     private val REVERSE_BUNDLE_ENABLED = booleanPreferencesKey("reverse_bundle_enabled")
+
+    /** 「逆向能力默认开启」一次性迁移是否已执行；置位后不再改写用户的开关选择。 */
+    private val REVERSE_BUNDLE_DEFAULT_ON_APPLIED =
+        booleanPreferencesKey("reverse_bundle_default_on_applied")
 
     /** Legacy storage key written for compatibility; reverse bundle controls all three behaviors. */
     private val USER_PROMPT_ENABLED = booleanPreferencesKey("user_prompt_enabled")
@@ -396,7 +400,7 @@ internal object SettingsDataStore {
                     throw cause
                 }
             }
-            .map { preferences -> preferences[REVERSE_BUNDLE_ENABLED] ?: false }
+            .map { preferences -> preferences[REVERSE_BUNDLE_ENABLED] ?: true }
             .first()
     }
 
@@ -456,6 +460,22 @@ internal object SettingsDataStore {
     suspend fun setUserPromptBuiltinSeeded(value: Boolean) {
         ensureInitialized()
         dataStore.edit { preferences -> preferences[USER_PROMPT_BUILTIN_SEEDED] = value }
+    }
+
+    /** 逆向能力默认开启的一次性迁移标记；只记录迁移是否做过，不承载业务含义。 */
+    suspend fun reverseBundleDefaultOnApplied(): Boolean {
+        ensureInitialized()
+        return dataStore.data
+            .catch { cause ->
+                if (cause is IOException) emptyPreferences() else throw cause
+            }
+            .map { preferences -> preferences[REVERSE_BUNDLE_DEFAULT_ON_APPLIED] ?: false }
+            .first()
+    }
+
+    suspend fun setReverseBundleDefaultOnApplied(value: Boolean) {
+        ensureInitialized()
+        dataStore.edit { preferences -> preferences[REVERSE_BUNDLE_DEFAULT_ON_APPLIED] = value }
     }
 
     suspend fun setLinuxDistribution(value: String?) {

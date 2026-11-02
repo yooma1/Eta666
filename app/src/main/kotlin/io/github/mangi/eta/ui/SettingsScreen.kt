@@ -108,7 +108,7 @@ internal fun SettingsScreen(
     context: Context,
     onNavigate: (AppRoute) -> Unit,
     onBack: () -> Unit,
-    reverseModeEnabled: Boolean = false,
+    reverseModeEnabled: Boolean = true,
     onToggleReverseMode: (Boolean) -> Unit = {},
 ) {
     SettingsPageContent(
