@@ -1870,6 +1870,23 @@ internal class AgentAppState(
         ).show()
     }
 
+    /** 本地 ingress 已复制并校验过附件，这里只做无竞态的合并。 */
+    internal fun attachIncomingContent(
+        images: List<PendingImageUi>,
+        files: List<PendingFileReferenceUi>,
+    ): Boolean {
+        if (!homeState.isConversationLoaded || homeState.messageEdit != null) return false
+        updateCurrentConversation(
+            homeState.copy(
+                pendingImages = (homeState.pendingImages + images).distinctBy { it.uri },
+                pendingFileReferences = (homeState.pendingFileReferences + files)
+                    .distinctBy { it.reference.absolutePath },
+            ),
+            updateTimestamp = false,
+        )
+        return true
+    }
+
     fun attachImage(uri: String) {
         scope.launch(Dispatchers.IO) {
             try {
