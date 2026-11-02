@@ -293,16 +293,6 @@ internal fun ChatMessageItem(
                     onDelete = { onDeleteMessage(message.id) },
                     onRegenerate = { onRegenerateMessage(message.id) },
                 )
-                if (message.code in RunFailureNoticeCodes) {
-                    // 刻意不受 messageActionsEnabled 约束：那个值是「正在生成/正在编辑」时禁用工具条，
-                    // 而失败提示出现本身就意味着这一轮已经结束。之前绑上去导致 isStreaming 残留为 true 时
-                    // 按钮看得见、点下去却被静默吞掉，观感就是「点了没反应」。
-                    RunFailureActionsRow(
-                        enabled = true,
-                        onRetry = { onRetryRun(message.id) },
-                        onContinue = onContinueRun,
-                    )
-                }
             }
         }
         is ThinkingMessageUi -> ThinkingRow(
@@ -1193,80 +1183,6 @@ private fun SuggestionChipsRow(
                 )
             }
         }
-    }
-}
-
-/** 需要在提示下方补“重试/继续”的失败态：任务没跑完，用户最可能的就是接着推。 */
-private val RunFailureNoticeCodes = setOf(
-    SystemNoticeCode.RuntimeFailed,
-    SystemNoticeCode.Interrupted,
-)
-
-/**
- * 失败提示下方的一键操作。
- *
- * 重试 = 回滚到该轮起点重发同一条用户消息；继续 = 追加一条“继续”把没做完的事接着做。
- * 两者都不需要用户重新打字，这一点是这排按钮存在的唯一理由。
- */
-@Composable
-private fun RunFailureActionsRow(
-    enabled: Boolean,
-    onRetry: () -> Unit,
-    onContinue: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        RunFailureActionChip(
-            icon = Icons.Rounded.Refresh,
-            label = stringResource(R.string.run_action_retry),
-            enabled = enabled,
-            onClick = onRetry,
-        )
-        RunFailureActionChip(
-            icon = Icons.Rounded.PlayArrow,
-            label = stringResource(R.string.run_action_continue),
-            enabled = enabled,
-            onClick = onContinue,
-        )
-    }
-}
-
-@Composable
-private fun RunFailureActionChip(
-    icon: ImageVector,
-    label: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(MiuixTheme.colorScheme.surface)
-            .border(
-                0.5.dp,
-                MiuixTheme.colorScheme.outline.copy(alpha = 0.55f),
-                RoundedCornerShape(10.dp),
-            )
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(12.dp),
-            tint = if (enabled) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.disabledOnSurface,
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = label,
-            style = MiuixTheme.textStyles.footnote1,
-            color = if (enabled) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.disabledOnSurface,
-        )
     }
 }
 

@@ -90,6 +90,8 @@ import io.github.mangi.eta.ui.model.MessageEditUiState
 import io.github.mangi.eta.ui.model.PendingFileReferenceUi
 import io.github.mangi.eta.ui.model.PendingImageUi
 import io.github.mangi.eta.ui.model.QueuedMessageUi
+import io.github.mangi.eta.ui.model.SystemNoticeCode
+import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
@@ -190,6 +192,13 @@ internal fun AgentChatBody(
         latestContextUsage(messages, modelPickerState.selectedModel)
     }
 
+    // 最后一轮是失败/中断提示时，把输入栏主键让给「继续」：这类回复最自然的下一步就是接着跑。
+    val continueAvailable = remember(messages) {
+        val last = messages.lastOrNull()
+        last is SystemNoticeMessageUi &&
+            last.code in setOf(SystemNoticeCode.RuntimeFailed, SystemNoticeCode.Interrupted)
+    }
+
     val visibleMessages = remember(messages, messageEdit?.targetMessageId, messageEdit?.preserveFollowingMessages) {
         AgentConversationRevisionReducer.visibleMessagesForEdit(
             messages = messages,
@@ -237,6 +246,8 @@ internal fun AgentChatBody(
         SpeechAutoReadAloud(messages = messages, isStreaming = isStreaming)
         AgentChatScaffold(
             visibleMessages = visibleMessages,
+            onContinueRun = onContinueRun,
+            continueAvailable = continueAvailable,
             hasMessages = visibleMessages.isNotEmpty() || hasEarlierMessages,
             scrollState = scrollState,
             input = input,
@@ -306,6 +317,7 @@ internal fun AgentChatBody(
 @OptIn(ExperimentalLayoutApi::class)
 private fun AgentChatScaffold(
     visibleMessages: List<AgentChatMessageUi>,
+    continueAvailable: Boolean,
     hasMessages: Boolean,
     scrollState: LazyListState,
     input: String,
@@ -392,6 +404,8 @@ private fun AgentChatScaffold(
                 messageEdit = messageEdit,
                 onSubmit = onSubmit,
                 onInterruptAndSubmit = onInterruptAndSubmit,
+                continueAvailable = continueAvailable,
+                onContinue = onContinueRun,
                 onSteerQueuedMessage = onSteerQueuedMessage,
                 onRecallQueuedMessage = onRecallQueuedMessage,
                 onRemoveQueuedMessage = onRemoveQueuedMessage,
@@ -1002,6 +1016,8 @@ internal fun resolveFinalResultMessageIds(
 @Composable
 private fun AgentChatBottomBar(
     messageBackdrop: LayerBackdrop?,
+    continueAvailable: Boolean,
+    onContinue: () -> Unit,
     input: String,
     modelPickerState: AgentModelPickerUiState,
     isCompacting: Boolean,
@@ -1109,6 +1125,8 @@ private fun AgentChatBottomBar(
                 preserveFollowingMessages = messageEdit?.preserveFollowingMessages == true,
                 onSubmit = onSubmit,
                 onInterruptAndSubmit = onInterruptAndSubmit,
+                continueAvailable = continueAvailable,
+                onContinue = onContinue,
                 onSteerQueuedMessage = onSteerQueuedMessage,
                 onRecallQueuedMessage = onRecallQueuedMessage,
                 onRemoveQueuedMessage = onRemoveQueuedMessage,

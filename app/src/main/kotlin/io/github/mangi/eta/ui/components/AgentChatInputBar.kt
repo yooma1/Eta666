@@ -45,8 +45,10 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material.icons.Icons
+import io.github.mangi.eta.core.AndroidAgentLogger
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -101,6 +103,9 @@ import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.window.WindowListPopup
 
+/** 输入栏主键三态：生成中=停止，失败后空草稿=继续，其余=发送。 */
+private enum class ChatPrimaryAction { Stop, Continue, Send }
+
 private val SendButtonVisualSize = ChatInputActionIconSize
 private val SendIconSize = 16.dp
 private val StopIconSize = 10.dp
@@ -134,6 +139,9 @@ internal fun AgentChatInputBar(
     onModelSelected: (String) -> Unit,
     onSubmit: (String) -> Unit,
     onInterruptAndSubmit: (String) -> Unit = onSubmit,
+    /** 上一轮以失败/中断收尾且草稿为空时，主键改成「继续」，用户不必再打一次字。 */
+    continueAvailable: Boolean = false,
+    onContinue: () -> Unit = {},
     onSteerQueuedMessage: (String) -> Unit = {},
     onRecallQueuedMessage: (String, String) -> Unit = { _, _ -> },
     onRemoveQueuedMessage: (String) -> Unit = {},
@@ -151,6 +159,7 @@ internal fun AgentChatInputBar(
     val hapticFeedback = LocalHapticFeedback.current
     val focusRequester = remember { FocusRequester() }
     val textFieldState = rememberTextFieldState(initialText = input)
+    io.github.mangi.eta.local.incoming.BindIncomingDraft(textFieldState)
     val speechSettings by remember { SpeechSettingsRepository.settingsFlow() }.collectAsState(initial = null)
     val recognitionEnabled = speechSettings?.recognitionEnabled == true
     val dictation = rememberSpeechInput { recognized ->
@@ -424,9 +433,19 @@ internal fun AgentChatInputBar(
                         }
 
                         val showPrimaryStop = isStreaming && !showStreamingSend
+                        // 继续键只在「没有草稿、没在生成」时取代发送键：用户一旦开始打字，
+                        // 意图就是发自己的内容，不该被继续抢走点击。
+                        val showContinuePrimary = continueAvailable &&
+                            !isStreaming && !isCompacting && !canSend
+                        val primaryAction = when {
+                            showPrimaryStop -> ChatPrimaryAction.Stop
+                            showContinuePrimary -> ChatPrimaryAction.Continue
+                            else -> ChatPrimaryAction.Send
+                        }
                         val sendButtonColor by animateColorAsState(
                             targetValue = when {
                                 showPrimaryStop -> MiuixTheme.colorScheme.onSurface
+                                showContinuePrimary -> MiuixTheme.colorScheme.primary
                                 canSend -> MiuixTheme.colorScheme.primary
                                 else -> MiuixTheme.colorScheme.surfaceContainerHigh
                             },
@@ -438,12 +457,17 @@ internal fun AgentChatInputBar(
                                 .size(ChatInputActionSize)
                                 .clip(CircleShape)
                                 .combinedClickable(
-                                    enabled = isStreaming || canSend,
+                                    enabled = isStreaming || canSend || showContinuePrimary,
                                     onClick = {
-                                        if (showPrimaryStop) {
-                                            onStop()
-                                        } else {
-                                            submitCurrentDraft(false)
+                                        // 三角「继续」点击链路单独打点：日志里出现这一行就说明命中了按钮，
+                                        // 没有出现则说明点击被上层手势或可见性动画吞掉。
+                                        if (primaryAction == ChatPrimaryAction.Continue) {
+                                            AndroidAgentLogger.warn("chat_continue_button_tapped")
+                                        }
+                                        when (primaryAction) {
+                                            ChatPrimaryAction.Stop -> onStop()
+                                            ChatPrimaryAction.Continue -> onContinue()
+                                            ChatPrimaryAction.Send -> submitCurrentDraft(false)
                                         }
                                     },
                                     onLongClick = if (showStreamingSend) {
@@ -466,7 +490,7 @@ internal fun AgentChatInputBar(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 AnimatedContent(
-                                    targetState = showPrimaryStop,
+                                    targetState = primaryAction,
                                     transitionSpec = {
                                         (fadeIn(tween(130)) + scaleIn(tween(160), initialScale = 0.72f))
                                             .togetherWith(
@@ -475,25 +499,32 @@ internal fun AgentChatInputBar(
                                             )
                                     },
                                     label = "send_stop_icon",
-                                ) { stopIcon ->
+                                ) { action ->
                                     Icon(
-                                        imageVector = if (stopIcon) {
-                                            Icons.Rounded.Stop
-                                        } else {
-                                            Icons.Rounded.ArrowUpward
+                                        imageVector = when (action) {
+                                            ChatPrimaryAction.Stop -> Icons.Rounded.Stop
+                                            ChatPrimaryAction.Continue -> Icons.Rounded.PlayArrow
+                                            ChatPrimaryAction.Send -> Icons.Rounded.ArrowUpward
                                         },
-                                        contentDescription = when {
-                                            stopIcon -> stringResource(R.string.chat_stop)
-                                            isEditingMessage && preserveFollowingMessages -> stringResource(R.string.chat_save_message)
-                                            else -> stringResource(R.string.chat_send)
+                                        contentDescription = when (action) {
+                                            ChatPrimaryAction.Stop -> stringResource(R.string.chat_stop)
+                                            ChatPrimaryAction.Continue -> stringResource(R.string.run_action_continue)
+                                            ChatPrimaryAction.Send ->
+                                                if (isEditingMessage && preserveFollowingMessages) {
+                                                    stringResource(R.string.chat_save_message)
+                                                } else {
+                                                    stringResource(R.string.chat_send)
+                                                }
                                         },
                                         modifier = Modifier.size(
-                                            if (stopIcon) StopIconSize else SendIconSize
+                                            if (action == ChatPrimaryAction.Stop) StopIconSize else SendIconSize
                                         ),
-                                        tint = when {
-                                            stopIcon -> MiuixTheme.colorScheme.surface
-                                            canSend -> MiuixTheme.colorScheme.onPrimary
-                                            else -> MiuixTheme.colorScheme.onSurfaceVariantActions
+                                        tint = when (action) {
+                                            ChatPrimaryAction.Stop -> MiuixTheme.colorScheme.surface
+                                            ChatPrimaryAction.Continue -> MiuixTheme.colorScheme.onPrimary
+                                            ChatPrimaryAction.Send ->
+                                                if (canSend) MiuixTheme.colorScheme.onPrimary
+                                                else MiuixTheme.colorScheme.onSurfaceVariantActions
                                         },
                                     )
                                 }
