@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -198,22 +199,56 @@ internal object ImageGenClient {
             return ImageGenOutcome.Failure("IMAGE_GEN_BAD_RESPONSE", raw.take(600))
         }
         if (data.length() == 0) {
-            return ImageGenOutcome.Failure("IMAGE_GEN_EMPTY_RESPONSE", raw.take(600))
+            // 少数站直接返回 {"url": ...} 或 {"b64_json": ...}，不包 data 数组。
+            val direct = JSONArray().put(root)
+            return parseItems(context, direct, model, notes, raw)
         }
+        return parseItems(context, data, model, notes, raw)
+    }
+
+    private fun parseItems(
+        context: Context,
+        data: JSONArray,
+        model: String,
+        notes: List<String>,
+        raw: String,
+    ): ImageGenOutcome {
         val dir = File(context.filesDir, "generated-images").apply { mkdirs() }
         val files = mutableListOf<File>()
+        var lastReason: String? = null
         for (index in 0 until data.length()) {
             val item = data.optJSONObject(index) ?: continue
-            val b64 = item.optString("b64_json").takeIf { it.isNotBlank() }
-            val bytes = if (b64 != null) {
-                runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
-            } else {
-                // 部分中转站忽略 response_format，仍回 url：再拉一次。
-                item.optString("url").takeIf { it.isNotBlank() }?.let(::download)
+            // 三种返回形态都要接：b64_json / b64 / url。中转站之间差异很大，
+            // 只认 b64_json 会把「其实已经生成成功」的结果判成失败。
+            val b64 = listOf("b64_json", "b64", "image", "image_base64")
+                .firstNotNullOfOrNull { key -> item.optString(key).takeIf { it.isNotBlank() } }
+            var bytes: ByteArray? = null
+            if (b64 != null) {
+                bytes = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull()
+                if (bytes != null && !bytes.looksLikeImage()) {
+                    // 有的站给的是去掉前缀的裸 base64，也有的是 data URL 前缀残留
+                    val normalized = b64.substringAfter("base64,", b64)
+                    bytes = runCatching { Base64.decode(normalized, Base64.DEFAULT) }.getOrNull()
+                }
+            }
+            if (bytes == null || !bytes.looksLikeImage()) {
+                val url = item.optString("url").takeIf { it.isNotBlank() }
+                if (url == null) {
+                    lastReason = "第 ${index + 1} 条既没有 b64_json 也没有 url"
+                    continue
+                }
+                bytes = download(url)
+                if (bytes == null) {
+                    lastReason = "url 下载失败：${url.take(120)}"
+                    continue
+                }
             }
             // Base64.decode 对任意字符串都可能「成功」，不校验魔数会把乱码写成 .png，
             // 表现为文件存在但打不开、模型侧解码失败。这里必须验真。
-            if (bytes == null || bytes.size < MIN_IMAGE_BYTES || !bytes.looksLikeImage()) continue
+            if (bytes.size < MIN_IMAGE_BYTES || !bytes.looksLikeImage()) {
+                lastReason = "第 ${index + 1} 条解码后只有 ${bytes.size} 字节，不像图片"
+                continue
+            }
             val file = File(dir, "gen-${System.currentTimeMillis()}-$index.${extensionOf(bytes)}")
             runCatching { file.writeBytes(bytes) }.getOrElse { continue }
             files += file
@@ -221,15 +256,21 @@ internal object ImageGenClient {
         return if (files.isEmpty()) {
             ImageGenOutcome.Failure(
                 "IMAGE_GEN_DECODE_FAILED",
-                "返回里没有可解析的图片数据（b64 为空或不是图片格式）。原始响应：" + raw.take(300),
+                (lastReason ?: "返回里没有可解析的图片数据") + "。原始响应：" + raw.take(300),
             )
         } else {
             ImageGenOutcome.Success(ImageGenResult(files = files, model = model, notes = notes))
         }
     }
 
+
     private fun download(url: String): ByteArray? = runCatching {
-        val request = Request.Builder().url(url).get().build()
+        // 部分站的图片 CDN 要求带 UA / Referer，不带会被 403；这里给一个浏览器 UA。
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/140 Mobile")
+            .get()
+            .build()
         client.newCall(request).execute().use { response ->
             if (response.isSuccessful) response.body?.bytes() else null
         }
