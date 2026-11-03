@@ -638,7 +638,7 @@ internal class AgentLoop(
                 AgentConversationCodec.userMessage(
                     text = "Generated image(s) by tool(s): $persistNames.",
                     images = persistImages,
-                ).put("_eta_generated", true),
+                ).put(AgentConversationCodec.GENERATED_IMAGE_FLAG, true),
             )
             persistent.forEach { outcome ->
                 onEvent(
