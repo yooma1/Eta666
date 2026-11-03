@@ -211,13 +211,18 @@ internal object ImageGenClient {
                 // 部分中转站忽略 response_format，仍回 url：再拉一次。
                 item.optString("url").takeIf { it.isNotBlank() }?.let(::download)
             }
-            if (bytes == null || bytes.isEmpty()) continue
+            // Base64.decode 对任意字符串都可能「成功」，不校验魔数会把乱码写成 .png，
+            // 表现为文件存在但打不开、模型侧解码失败。这里必须验真。
+            if (bytes == null || bytes.size < MIN_IMAGE_BYTES || !bytes.looksLikeImage()) continue
             val file = File(dir, "gen-${System.currentTimeMillis()}-$index.${extensionOf(bytes)}")
             runCatching { file.writeBytes(bytes) }.getOrElse { continue }
             files += file
         }
         return if (files.isEmpty()) {
-            ImageGenOutcome.Failure("IMAGE_GEN_DECODE_FAILED", "返回内容里没有可解析的图片数据")
+            ImageGenOutcome.Failure(
+                "IMAGE_GEN_DECODE_FAILED",
+                "返回里没有可解析的图片数据（b64 为空或不是图片格式）。原始响应：" + raw.take(300),
+            )
         } else {
             ImageGenOutcome.Success(ImageGenResult(files = files, model = model, notes = notes))
         }
@@ -229,6 +234,21 @@ internal object ImageGenClient {
             if (response.isSuccessful) response.body?.bytes() else null
         }
     }.getOrNull()
+
+    /** 魔数白名单：只有真正像图片的字节才允许落盘。 */
+    private fun ByteArray.looksLikeImage(): Boolean = when {
+        size >= 8 && this[0] == 0x89.toByte() && this[1] == 'P'.code.toByte() &&
+            this[2] == 'N'.code.toByte() && this[3] == 'G'.code.toByte() -> true
+        size >= 3 && this[0] == 0xFF.toByte() && this[1] == 0xD8.toByte() &&
+            this[2] == 0xFF.toByte() -> true
+        size >= 12 && String(this, 0, 4) == "RIFF" && String(this, 8, 4) == "WEBP" -> true
+        size >= 6 && (String(this, 0, 6) == "GIF89a" || String(this, 0, 6) == "GIF87a") -> true
+        size >= 2 && String(this, 0, 2) == "BM" -> true
+        else -> false
+    }
+
+    /** 再小的「图片」都不可能是真图；用它挡掉解码出的碎片。 */
+    private const val MIN_IMAGE_BYTES = 512
 
     /** 按魔数判扩展名，别信 Content-Type：决定后续 BitmapFactory 能否识别。 */
     private fun extensionOf(bytes: ByteArray): String = when {

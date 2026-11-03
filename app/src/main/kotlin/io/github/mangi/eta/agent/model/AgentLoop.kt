@@ -627,10 +627,36 @@ internal class AgentLoop(
             return
         }
 
+        // 生图结果是会话资产：不标记 _eta_observation，让它随消息落盘并在对话里显示。
+        val persistent = imageOutcomes.filter { it.result.persistImages }
+        val transient = imageOutcomes.filterNot { it.result.persistImages }
+
+        if (persistent.isNotEmpty()) {
+            val persistImages = persistent.flatMap { it.result.images }
+            val persistNames = persistent.map { it.call.name }.distinct().joinToString(", ")
+            messages.put(
+                AgentConversationCodec.userMessage(
+                    text = "Generated image(s) by tool(s): $persistNames.",
+                    images = persistImages,
+                ).put("_eta_generated", true),
+            )
+            persistent.forEach { outcome ->
+                onEvent(
+                    AgentEvent.ToolImagesAttached(
+                        round = round,
+                        toolName = outcome.call.name,
+                        imageCount = outcome.result.images.size,
+                        imageBytes = outcome.result.images.sumOf { it.bytes },
+                    )
+                )
+            }
+        }
+        if (transient.isEmpty()) return
+
         // 工具截图是瞬时观察，不是会话资产。下一次思考消费后立即删除。
         discardPendingToolImageMessage()
-        val images = imageOutcomes.flatMap { outcome -> outcome.result.images }
-        val toolNames = imageOutcomes
+        val images = transient.flatMap { outcome -> outcome.result.images }
+        val toolNames = transient
             .map { outcome -> outcome.call.name }
             .distinct()
             .joinToString(", ")
@@ -639,7 +665,7 @@ internal class AgentLoop(
             images = images,
         ).put("_eta_observation", true).also(messages::put)
 
-        imageOutcomes.forEach { outcome ->
+        transient.forEach { outcome ->
             onEvent(
                 AgentEvent.ToolImagesAttached(
                     round = round,

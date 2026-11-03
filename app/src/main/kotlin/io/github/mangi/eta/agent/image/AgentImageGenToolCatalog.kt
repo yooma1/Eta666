@@ -102,6 +102,8 @@ internal object AgentImageGenToolCatalog {
                         .toString(),
                     // 结果图直接带回视觉输入：模型无需再走一次 read_image 才能描述它生成的东西。
                     images = images,
+                    // 与 read_image 的瞬时观察不同：生成的图要留在对话里给用户看。
+                    persistImages = true,
                 )
             }
         }

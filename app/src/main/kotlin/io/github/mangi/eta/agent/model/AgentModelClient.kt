@@ -437,6 +437,11 @@ internal object AgentModelClient {
          */
         val sensitive: Boolean = false,
         val command: String? = null,
+        /**
+         * 结果图是「会话资产」而非瞬时观察：为 true 时图片随消息持久保留并可被 UI 渲染
+         * （生图用）。默认 false 走瞬时观察路径（read_image / 截图），用完即弃。
+         */
+        val persistImages: Boolean = false,
     )
 
     /** 图片引用：入口侧可为本地 URI/路径，进入模型协议前必须解析为远程 URL 或 data URL。 */
