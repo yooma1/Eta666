@@ -42,10 +42,10 @@ internal object AgentRuntimeHistoryReducer {
         // 生图结果必须变成可见的 UI 消息：runtime 的 transcript 只喂 history/journal，
         // 从不写 state.messages，所以图片会"生成了但看不到"。按 messageId 前缀挑出来追加。
         val generatedMessages = additions
-            .filter { it.messageId.startsWith(GENERATED_IMAGE_ID_PREFIX) }
+            .filter { it.generatedImages || it.messageId.startsWith(GENERATED_IMAGE_ID_PREFIX) }
             .map { message ->
                 UserMessageUi(
-                    id = message.messageId,
+                    id = message.messageId.ifBlank { "generated-image-${message.hashCode()}" },
                     content = message.content,
                     images = imageReferencesOf(message),
                 )

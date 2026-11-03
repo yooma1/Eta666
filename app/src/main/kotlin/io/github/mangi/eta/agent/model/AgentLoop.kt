@@ -640,12 +640,16 @@ internal class AgentLoop(
             val persistNames = persistent.map { it.call.name }.distinct().joinToString(", ")
             // 必须走 appendMessage：它同时写 messages（供 provider）与 transcript（供 UI）。
             // 只写 messages 的话 publishTranscript 读不到，图片永远不会出现在会话里。
-            appendMessage(
-                AgentConversationCodec.userMessage(
-                    text = "Generated image(s) by tool(s): $persistNames.",
-                    images = persistImages,
-                ).put(AgentConversationCodec.GENERATED_IMAGE_FLAG, true),
-            )
+            // 三个标记缺一不可：
+            // _eta_generated  → 落库时跳过 sanitize（否则图被剥成占位文字）
+            // _eta_message_id → UI 侧按前缀识别成可见图片消息
+            // generatedImages → 上面两者的 DTO 载体，序列化往返后仍存活
+            val generatedMessage = AgentConversationCodec.userMessage(
+                text = "Generated image(s) by tool(s): $persistNames.",
+                images = persistImages,
+            ).put(AgentConversationCodec.GENERATED_IMAGE_FLAG, true)
+                .put("_eta_message_id", "$GENERATED_IMAGE_ID_PREFIX${System.currentTimeMillis()}")
+            appendMessage(generatedMessage)
             persistent.forEach { outcome ->
                 onEvent(
                     AgentEvent.ToolImagesAttached(

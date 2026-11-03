@@ -424,6 +424,11 @@ internal object AgentModelClient {
         val compactedUserTurns: Int = 0,
         val summaryThroughUserTurn: Int = 0,
         val messageId: String = "",
+        /**
+         * 会话资产标记：生图结果的真图必须跨"序列化→落库→读回"存活。
+         * 只有它成为字段，checkpoint 往返后仍能被识别；否则 sanitize 会把图剥成占位文字。
+         */
+        val generatedImages: Boolean = false,
     )
 
     fun interface ToolExecutor {

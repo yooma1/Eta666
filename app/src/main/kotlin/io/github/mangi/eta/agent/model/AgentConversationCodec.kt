@@ -24,7 +24,8 @@ internal object AgentConversationCodec {
     }
 
     fun encodeTranscriptForStorage(messages: List<AgentModelClient.ConversationMessage>): String =
-        json.encodeToString(messages.map(::sanitizeMessage))
+        // 生图消息是会话资产，落库时同样保住图片；其余照旧清理以省存储。
+        json.encodeToString(messages.map { if (it.generatedImages) it else sanitizeMessage(it) })
 
     fun encodeConversationCheckpoint(messages: List<AgentModelClient.ConversationMessage>): String =
         encodeTranscriptForStorage(messages)
@@ -85,6 +86,7 @@ internal object AgentConversationCodec {
             toolCallId = message.optString("tool_call_id"),
             reasoningContent = message.optString("reasoning_content"),
             toolCallsJson = message.optJSONArray("tool_calls")?.toString().orEmpty(),
+            generatedImages = message.optBoolean("_eta_generated"),
         )
     }
 
@@ -255,7 +257,8 @@ internal object AgentConversationCodec {
     private fun sanitizeMessage(
         message: AgentModelClient.ConversationMessage,
     ): AgentModelClient.ConversationMessage =
-        message.copy(
+        if (message.generatedImages) message
+        else message.copy(
             role = message.role,
             content = message.content,
             contentJson = sanitizeContentJson(message.contentJson),
