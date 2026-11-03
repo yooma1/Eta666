@@ -39,8 +39,23 @@ internal object AgentRuntimeHistoryReducer {
             require(covered in 0..additions.size || additions.isEmpty()) { "Invalid context transcript boundary" }
             validSnapshot.messages + additions.drop(covered) + laterHistory + pendingSupplements
         } else state.history + additions + pendingSupplements
+        // 生图结果必须变成可见的 UI 消息：runtime 的 transcript 只喂 history/journal，
+        // 从不写 state.messages，所以图片会"生成了但看不到"。按 messageId 前缀挑出来追加。
+        val generatedMessages = additions
+            .filter { it.messageId.startsWith(GENERATED_IMAGE_ID_PREFIX) }
+            .map { message ->
+                UserMessageUi(
+                    id = message.messageId,
+                    content = message.content,
+                    images = imageReferencesOf(message),
+                )
+            }
+        val knownIds = state.messages.mapTo(mutableSetOf()) { it.id }
+        val newMessages = generatedMessages.filter { it.id !in knownIds }
+
         return Outcome(
             state = state.copy(
+                messages = if (newMessages.isEmpty()) state.messages else state.messages + newMessages,
                 journal = boundedJournal(
                     state.journal.ifEmpty { state.history } + additions + pendingSupplements,
                 ),
@@ -54,4 +69,19 @@ internal object AgentRuntimeHistoryReducer {
     fun wasApplied(state: AgentChatHomeUiState, runId: String): Boolean =
         runId in state.appliedRuntimeRunIds
 
+    private const val GENERATED_IMAGE_ID_PREFIX = "generated-image-"
+
+    /** contentJson 里的 data URL 就是 UI 显示要用的引用，直接抽出来给 MessageImageRow。 */
+    private fun imageReferencesOf(message: AgentModelClient.ConversationMessage): List<String> {
+        val raw = message.contentJson
+        if (raw.isBlank()) return emptyList()
+        val array = runCatching { org.json.JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                item.optJSONObject("image_url")?.optString("url")
+                    ?.takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }
 }

@@ -63,6 +63,10 @@ internal class AgentLoop(
     private val accumulatedReasoning = StringBuilder()
     private val sensitiveToolCallIds = linkedSetOf<String>()
     private val toolBatchLock = Any()
+    private companion object {
+        const val GENERATED_IMAGE_ID_PREFIX = "generated-image-"
+    }
+
     private var pendingToolImageMessage: JSONObject? = null
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
