@@ -634,7 +634,9 @@ internal class AgentLoop(
         if (persistent.isNotEmpty()) {
             val persistImages = persistent.flatMap { it.result.images }
             val persistNames = persistent.map { it.call.name }.distinct().joinToString(", ")
-            messages.put(
+            // 必须走 appendMessage：它同时写 messages（供 provider）与 transcript（供 UI）。
+            // 只写 messages 的话 publishTranscript 读不到，图片永远不会出现在会话里。
+            appendMessage(
                 AgentConversationCodec.userMessage(
                     text = "Generated image(s) by tool(s): $persistNames.",
                     images = persistImages,
