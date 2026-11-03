@@ -151,6 +151,15 @@ internal object AgentModelClient {
             rootAvailable = initialCapabilities.rootAvailable,
             roleplayContext = roleplayContext,
             executionContext = executionContext,
+            // 只看请求里是否真的有这个工具：未配置生图时不要把模型引向不存在的工具。
+            imageGenAvailable = run {
+                val target = io.github.mangi.eta.agent.image.AgentImageGenToolCatalog.GENERATE_IMAGE
+                (0 until additionalTools.length()).any { index ->
+                    additionalTools.optJSONObject(index)
+                        ?.optJSONObject("function")
+                        ?.optString("name") == target
+                }
+            },
         )
         if (rewriteReply) {
             messages.put(messages.length() - 1, AgentConversationCodec.userTextMessage(

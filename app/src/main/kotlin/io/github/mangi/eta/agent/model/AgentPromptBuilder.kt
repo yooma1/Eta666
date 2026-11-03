@@ -23,10 +23,11 @@ internal object AgentPromptBuilder {
         roleplayContext: RoleplayRunContext? = null,
         executionContext: TerminalExecutionContext? = null,
         redteamProtocol: String = "",
+        imageGenAvailable: Boolean = false,
     ): JSONArray {
         val messages = buildSystemMessages(
             config, skillContext, memoryContext, rootAvailable, roleplayContext, executionContext,
-            userPrompt, goal, redteamProtocol,
+            userPrompt, goal, redteamProtocol, imageGenAvailable,
         )
         history.forEach { item ->
             runCatching { AgentConversationCodec.toJsonObject(item) }.getOrNull()?.let(messages::put)
@@ -50,6 +51,7 @@ internal object AgentPromptBuilder {
         userPrompt: AgentUserPromptSnapshot = AgentUserPromptSnapshot.EMPTY,
         goal: String = "",
         redteamProtocol: String = "",
+        imageGenAvailable: Boolean = false,
     ): JSONArray {
         val messages = JSONArray()
         if (roleplayContext == null && config.systemPrompt.isNotBlank()) {
@@ -123,6 +125,20 @@ internal object AgentPromptBuilder {
                     "不要改用坐标或 Shell 重放 GUI 动作。"
             )
         )
+        // 生图工具可用时补一条硬规则：不给"要不要我画"的文字代答留口子。
+        // 只在工具真的存在于请求中时注入，避免未配置生图时误导模型去调用不存在的工具。
+        if (imageGenAvailable) {
+            messages.put(
+                systemMessage(
+                    "生图能力已开启（generate_image）。用户表达出任何画图意图时——画、绘制、来一张、生成图片、" +
+                        "插画、壁纸、封面、头像、海报、logo、示意图、配图、换个风格重画等——直接调用 " +
+                        "generate_image，不要先用文字询问是否要画，也不要用文字描述代替出图。" +
+                        "工具返回的图片会自动显示在对话里，你只需在调用后简短说明。" +
+                        "调用前不必索取多余参数；用户没指定尺寸就留空，没指定张数就默认 1。" +
+                        "涉及真实凭证、票据、收款截图等内容的改写请求，不用于伪造或篡改事实性记录。",
+                ),
+            )
+        }
         if (config.terminalTools) {
             messages.put(systemMessage(
                 "Eta 内置文件与终端工具。文件和命令共用本次运行的默认身份与工作区；已知路径可直接读取或写入，不必先查目录。" +
