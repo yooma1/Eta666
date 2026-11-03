@@ -87,6 +87,9 @@ internal object AgentImageGenToolCatalog {
                 val paths = JSONArray().also { array ->
                     outcome.result.files.forEach { array.put(it.absolutePath) }
                 }
+                val notes = JSONArray().also { array ->
+                    outcome.result.notes.forEach { array.put(it) }
+                }
                 AgentModelClient.ToolResult(
                     content = JSONObject()
                         .put("ok", true)
@@ -94,6 +97,8 @@ internal object AgentImageGenToolCatalog {
                         .put("count", outcome.result.files.size)
                         .put("paths", paths)
                         .put("prompt", prompt)
+                        // 参数被降级时明说，避免模型以为真的拿到了请求的张数/尺寸。
+                        .put("adjustments", notes)
                         .toString(),
                     // 结果图直接带回视觉输入：模型无需再走一次 read_image 才能描述它生成的东西。
                     images = images,

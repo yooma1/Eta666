@@ -43,6 +43,8 @@ internal data class ImageGenConfig(
 internal data class ImageGenResult(
     val files: List<File>,
     val model: String,
+    /** 参数被按模型规则修正时的说明（例如 dall-e-3 只出 1 张）；空表示完全按请求执行。 */
+    val notes: List<String> = emptyList(),
 )
 
 internal sealed interface ImageGenOutcome {

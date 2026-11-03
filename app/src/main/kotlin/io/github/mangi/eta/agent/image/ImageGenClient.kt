@@ -33,6 +33,13 @@ internal object ImageGenClient {
 
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
+    private data class PostResult(
+        val ok: Boolean,
+        val status: Int,
+        val body: String,
+        val networkError: String?,
+    )
+
     /**
      * @param size 形如 `1024x1024`；留空则由服务端决定。
      * @return 已落盘的文件列表（失败时为空）与错误说明。
@@ -53,46 +60,98 @@ internal object ImageGenClient {
         if (prompt.isBlank()) {
             return ImageGenOutcome.Failure("IMAGE_GEN_EMPTY_PROMPT", "prompt 不能为空")
         }
+        // 先按模型名把参数掰到合法区间：dall-e-3 只认 n=1、gpt-image 不接受 response_format。
+        val rules = ImageGenModelRules.adjust(config.model, size.trim(), count)
         val payload = JSONObject()
             .put("model", config.model)
             .put("prompt", prompt)
-            .put("n", count.coerceIn(1, MAX_IMAGES))
-            .put("response_format", "b64_json")
-        size.trim().takeIf { it.isNotEmpty() }?.let { payload.put("size", it) }
+            .put("n", rules.n)
+        if (!rules.omitResponseFormat) payload.put("response_format", "b64_json")
+        rules.size.takeIf { it.isNotEmpty() }?.let { payload.put("size", it) }
 
-        val request = Request.Builder()
-            .url(config.generationsUrl())
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
-            .addHeader("Content-Type", "application/json")
-            .post(payload.toString().toRequestBody(jsonMedia))
-            .build()
+        val notes = rules.notes.toMutableList()
 
-        val body = try {
-            client.newCall(request).execute().use { response ->
-                val text = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    return ImageGenOutcome.Failure(
-                        code = "IMAGE_GEN_HTTP_${response.code}",
-                        message = text.take(600).ifBlank { "HTTP ${response.code}" },
+        fun post(p: JSONObject): PostResult {
+            val request = Request.Builder()
+                .url(config.generationsUrl())
+                .addHeader("Authorization", "Bearer ${config.apiKey}")
+                .addHeader("Content-Type", "application/json")
+                .post(p.toString().toRequestBody(jsonMedia))
+                .build()
+            return try {
+                client.newCall(request).execute().use { response ->
+                    PostResult(
+                        ok = response.isSuccessful,
+                        status = response.code,
+                        body = response.body?.string().orEmpty(),
+                        networkError = null,
                     )
                 }
-                text
+            } catch (e: IOException) {
+                PostResult(false, 0, "", "${e.javaClass.simpleName}: ${e.message ?: "请求失败"}")
             }
-        } catch (e: IOException) {
+        }
+
+        var result = post(payload)
+        // 400 且明确指向某个可选参数时，摘掉它再试一次：不同中转站的参数白名单差异很大，
+        // 与其让用户去猜，不如自己降级并把降级原因回传。
+        if (!result.ok && result.status == 400) {
+            val text = result.body.lowercase()
+            if (payload.has("response_format") &&
+                ("response_format" in text || "unknown" in text || "unrecognized" in text)
+            ) {
+                payload.remove("response_format")
+                notes += "服务端不接受 response_format，已省略该参数重试"
+                result = post(payload)
+            }
+            if (!result.ok && result.status == 400 && payload.has("size") && "size" in text) {
+                payload.remove("size")
+                notes += "服务端不接受该 size，已省略让服务端决定"
+                result = post(payload)
+            }
+        }
+
+        if (result.networkError != null) {
             // 网络类错误单独给 code：超时和 DNS 失败在中转站场景很常见。
+            return ImageGenOutcome.Failure("IMAGE_GEN_NETWORK", result.networkError)
+        }
+        if (!result.ok) {
             return ImageGenOutcome.Failure(
-                code = "IMAGE_GEN_NETWORK",
-                message = "${e.javaClass.simpleName}: ${e.message ?: "请求失败"}",
+                code = "IMAGE_GEN_HTTP_${result.status}",
+                message = result.body.take(600).ifBlank { "HTTP ${result.status}" },
             )
         }
 
-        return parseAndStore(context, body, config.model)
+        return parseAndStore(context, result.body, config.model, notes)
     }
 
-    private fun parseAndStore(context: Context, raw: String, model: String): ImageGenOutcome {
+    private fun parseAndStore(
+        context: Context,
+        raw: String,
+        model: String,
+        notes: List<String>,
+    ): ImageGenOutcome {
         val root = JSONObject(raw)
         val data = root.optJSONArray("data")
-            ?: return ImageGenOutcome.Failure("IMAGE_GEN_BAD_RESPONSE", raw.take(600))
+        if (data == null) {
+            // 异步任务制服务会回 task id 而不是图：明确告诉模型这条路走不通，
+            // 而不是丢一个 "BAD_RESPONSE" 让它反复重试。
+            val taskId = root.optString("task_id").ifBlank { root.optString("id") }
+                .ifBlank { root.optJSONObject("output")?.optString("task_id").orEmpty() }
+            if (taskId.isNotBlank() || root.has("status") || root.has("task_status")) {
+                val hint = if (ImageGenModelRules.isAsyncFamily(model)) {
+                    "该模型是中转站上的异步任务制（seedream/可灵一类），当前只支持同步返回。"
+                } else {
+                    "服务端返回了任务 id 而非图片。"
+                }
+                return ImageGenOutcome.Failure(
+                    code = "IMAGE_GEN_ASYNC_TASK",
+                    message = hint + "需要轮询接口，当前实现不支持；换支持同步返回的模型" +
+                        "（gpt-image / nano-banana / flux 系列）。原始响应：" + raw.take(300),
+                )
+            }
+            return ImageGenOutcome.Failure("IMAGE_GEN_BAD_RESPONSE", raw.take(600))
+        }
         if (data.length() == 0) {
             return ImageGenOutcome.Failure("IMAGE_GEN_EMPTY_RESPONSE", raw.take(600))
         }
@@ -115,7 +174,7 @@ internal object ImageGenClient {
         return if (files.isEmpty()) {
             ImageGenOutcome.Failure("IMAGE_GEN_DECODE_FAILED", "返回内容里没有可解析的图片数据")
         } else {
-            ImageGenOutcome.Success(ImageGenResult(files = files, model = model))
+            ImageGenOutcome.Success(ImageGenResult(files = files, model = model, notes = notes))
         }
     }
 
