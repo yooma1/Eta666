@@ -456,6 +456,8 @@ internal object AgentModelClient {
          * （生图用）。默认 false 走瞬时观察路径（read_image / 截图），用完即弃。
          */
         val persistImages: Boolean = false,
+        /** 已落盘的截图展示副本；只用于聊天 UI，不参与模型请求。 */
+        val displayImagePaths: List<String> = emptyList(),
     )
 
     /** 图片引用：入口侧可为本地 URI/路径，进入模型协议前必须解析为远程 URL 或 data URL。 */
