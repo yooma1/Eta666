@@ -120,6 +120,12 @@ internal object SettingsDataStore {
 
     /** 随包内置破甲记忆是否已自动装配过一次；置位后不再自动重建，尊重用户的删除。 */
     private val USER_PROMPT_BUILTIN_SEEDED = booleanPreferencesKey("user_prompt_builtin_seeded")
+    /** 生图（OpenAI 兼容中转站）；与聊天模型配置完全独立，避免互相覆盖。 */
+    private val IMAGE_GEN_ENABLED = booleanPreferencesKey("image_gen_enabled")
+    private val IMAGE_GEN_BASE_URL = stringPreferencesKey("image_gen_base_url")
+    private val IMAGE_GEN_API_KEY = stringPreferencesKey("image_gen_api_key")
+    private val IMAGE_GEN_MODEL = stringPreferencesKey("image_gen_model")
+
     private val REDTEAM_MODE = booleanPreferencesKey("redteam_mode")
     private val LINUX_DISTRIBUTION = stringPreferencesKey("linux_distribution")
     private val APPEARANCE_THEME_MODE = stringPreferencesKey("appearance_theme_mode")
@@ -477,6 +483,37 @@ internal object SettingsDataStore {
         ensureInitialized()
         dataStore.edit { preferences -> preferences[REVERSE_BUNDLE_DEFAULT_ON_APPLIED] = value }
     }
+
+    /** 生图配置快照；未配置时 enabled=false，工具不会出现在工具的 schema 列表里。 */
+    suspend fun imageGenSettings(): ImageGenSettings {
+        ensureInitialized()
+        val prefs = dataStore.data
+            .catch { cause -> if (cause is IOException) emptyPreferences() else throw cause }
+            .first()
+        return ImageGenSettings(
+            enabled = prefs[IMAGE_GEN_ENABLED] ?: false,
+            baseUrl = prefs[IMAGE_GEN_BASE_URL] ?: "",
+            apiKey = prefs[IMAGE_GEN_API_KEY] ?: "",
+            model = prefs[IMAGE_GEN_MODEL] ?: "",
+        )
+    }
+
+    suspend fun setImageGenSettings(settings: ImageGenSettings) {
+        ensureInitialized()
+        dataStore.edit { prefs ->
+            prefs[IMAGE_GEN_ENABLED] = settings.enabled
+            prefs[IMAGE_GEN_BASE_URL] = settings.baseUrl
+            prefs[IMAGE_GEN_API_KEY] = settings.apiKey
+            prefs[IMAGE_GEN_MODEL] = settings.model
+        }
+    }
+
+    data class ImageGenSettings(
+        val enabled: Boolean = false,
+        val baseUrl: String = "",
+        val apiKey: String = "",
+        val model: String = "",
+    )
 
     suspend fun setLinuxDistribution(value: String?) {
         ensureInitialized()

@@ -44,6 +44,8 @@ import io.github.mangi.eta.agent.skill.PublicGitHubSkillSource
 import io.github.mangi.eta.agent.skill.ProjectSpecDetector
 import io.github.mangi.eta.agent.skill.ResolvedSkillContext
 import io.github.mangi.eta.agent.skill.ReverseSignalRouter
+import io.github.mangi.eta.agent.image.AgentImageGenToolCatalog
+import io.github.mangi.eta.agent.image.ImageGenConfig
 import io.github.mangi.eta.agent.skill.ReverseSkillCatalog
 import io.github.mangi.eta.agent.skill.SkillIndexEntry
 import io.github.mangi.eta.agent.skill.SkillTriggerSignals
@@ -498,14 +500,25 @@ internal class AgentRuntimeRunExecutor(
                     )
                 },
             )
+            // 生图配置在每轮开始读一次：设置改完不必重启会话即生效。
+            val imageGenConfig = runCatching {
+                runBlocking { SettingsDataStore.imageGenSettings() }
+            }.getOrNull()?.let { s ->
+                ImageGenConfig.fromSettings(s.baseUrl, s.apiKey, s.model, s.enabled)
+            }
             val runTools = JSONArray(mcpTools.toString()).also { tools ->
+                if (imageGenConfig?.usable == true) {
+                    AgentImageGenToolCatalog.appendSchemas(tools, enabled = true)
+                }
                 if (subagentAllowed()) AgentSubagentToolCatalog.appendSchemas(tools)
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
                 if (characterMemoryTools != null && memoryEnabled) CharacterMemoryTools.appendSchemas(tools)
                 if (taskTool != null) tools.put(taskTool.schema())
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
-                if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
+                if (call.name == AgentImageGenToolCatalog.GENERATE_IMAGE && imageGenConfig != null) {
+                    AgentImageGenToolCatalog.execute(appContext, imageGenConfig, call.argumentsJson)
+                } else if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
                     historyTool.execute(call)
                 } else if (call.name in CharacterMemoryTools.NAMES && characterMemoryTools != null) {
                     characterMemoryTools.execute(call)

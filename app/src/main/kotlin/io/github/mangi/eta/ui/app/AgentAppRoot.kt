@@ -496,6 +496,9 @@ fun AgentAppRoot(
             entry<AppRoute.WebToolsSettings>(swipeDismiss = swipeDismiss) {
                 WebToolsSettingsScreen(onBack = ::popRoute)
             }
+            entry<AppRoute.ImageGenSettings>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.tools.ImageGenSettingsScreen(onBack = ::popRoute)
+            }
             entry<AppRoute.Skills>(swipeDismiss = swipeDismiss) {
                 LaunchedEffect(Unit) {
                     skills.refreshSkills()

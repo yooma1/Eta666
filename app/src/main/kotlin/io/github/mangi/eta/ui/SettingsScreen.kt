@@ -360,6 +360,19 @@ private fun SettingsPageContent(
 
                     EtaPreferenceDivider()
                     EtaArrowPreference(
+                        title = "生图（中转站）",
+                        summary = "OpenAI 兼容 /v1/images/generations，供 generate_image 工具使用",
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.Palette,
+                                tint = EtaPreferenceColors.Green,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.ImageGenSettings) },
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
                         title = "编辑作战协议",
                         startAction = {
                             EtaPreferenceIcon(
