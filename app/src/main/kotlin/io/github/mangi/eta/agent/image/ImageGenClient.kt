@@ -125,6 +125,43 @@ internal object ImageGenClient {
         return parseAndStore(context, result.body, config.model, notes)
     }
 
+    /**
+     * 拉中转站的 `/v1/models`，供设置页直接选模型。
+     *
+     * 这里不校验 model 字段：用户往往先有 url+key 才去挑模型名。
+     */
+    fun fetchModels(config: ImageGenConfig): Result<List<String>> {
+        if (config.baseUrl.isBlank() || config.apiKey.isBlank()) {
+            return Result.failure(IllegalStateException("先填 base_url 和 API Key"))
+        }
+        val request = Request.Builder()
+            .url(config.modelsUrl())
+            .addHeader("Authorization", "Bearer ${config.apiKey}")
+            .get()
+            .build()
+        return try {
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    return Result.failure(IllegalStateException("HTTP ${response.code}：${text.take(200)}"))
+                }
+                val data = JSONObject(text).optJSONArray("data")
+                    ?: return Result.failure(IllegalStateException("响应里没有 data 数组"))
+                val ids = buildList {
+                    for (i in 0 until data.length()) {
+                        data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                }.distinct().sorted()
+                if (ids.isEmpty()) Result.failure(IllegalStateException("模型列表为空"))
+                else Result.success(ids)
+            }
+        } catch (e: IOException) {
+            Result.failure(IllegalStateException("${e.javaClass.simpleName}: ${e.message ?: "请求失败"}"))
+        } catch (e: org.json.JSONException) {
+            Result.failure(IllegalStateException("返回不是合法 JSON：${e.message}"))
+        }
+    }
+
     private fun parseAndStore(
         context: Context,
         raw: String,

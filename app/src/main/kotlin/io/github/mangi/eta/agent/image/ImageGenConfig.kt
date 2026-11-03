@@ -16,6 +16,17 @@ internal data class ImageGenConfig(
 ) {
     val usable: Boolean get() = enabled && baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
 
+    /** 拉模型列表用；与 generations 同一套 base_url 归一化。 */
+    fun modelsUrl(): String {
+        val trimmed = baseUrl.trim().trimEnd('/')
+        return when {
+            trimmed.endsWith("/models") -> trimmed
+            trimmed.endsWith("/v1") -> "$trimmed/models"
+            trimmed.endsWith("/images/generations") -> trimmed.removeSuffix("/images/generations") + "/models"
+            else -> "$trimmed/v1/models"
+        }
+    }
+
     /** 允许用户填 `https://host/v1`、`https://host/v1/` 或整条 generations 路径。 */
     fun generationsUrl(): String {
         val trimmed = baseUrl.trim().trimEnd('/')
