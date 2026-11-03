@@ -74,6 +74,13 @@ internal object VirtualDisplayController {
     private var lastUiFrameAtElapsedMs: Long = 0L
     private val mutedPackages = linkedSetOf<String>()
 
+    /**
+     * 接管前的主屏现场。用户关掉虚拟屏时要把接管的 app 原样送回主屏，
+     * 再把焦点还给当时的顶层任务——这样用户回到的是原来的界面，而不是我们的 app。
+     */
+    private var restoreFocusTaskId: Int = Display.INVALID_DISPLAY
+    private var adoptedPackage: String = ""
+
     fun isBackendAvailable(rootAvailable: Boolean, lsposedAvailable: Boolean): Boolean =
         rootAvailable || lsposedAvailable
 
@@ -189,6 +196,8 @@ internal object VirtualDisplayController {
     ): Int? {
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
         val appContext = context.applicationContext
+        // 采样必须在启动之前：一旦任务被迁到虚拟屏，主屏顶层就变成 Eta 自己了。
+        captureMainDisplayScene(packageName)
         mutePackageAudioFocusIfPossible(appContext, packageName, rootAvailable)
 
         val startedInProcess = runCatching {
@@ -253,6 +262,7 @@ internal object VirtualDisplayController {
     ): Int? {
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
         val appContext = context.applicationContext
+        captureMainDisplayScene(intent.component?.packageName.orEmpty())
         val started = runCatching {
             val launch = Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
@@ -311,6 +321,9 @@ internal object VirtualDisplayController {
         }
 
         val appContext = context.applicationContext
+        // 用户明确要求把结果留在主屏：清掉现场，避免 release 把焦点抢回别的界面。
+        restoreFocusTaskId = Display.INVALID_DISPLAY
+        adoptedPackage = ""
         restoreMutedPackages(appContext, rootAvailable)
 
         val moved = moveVirtualTaskToMainDisplay(
@@ -477,8 +490,31 @@ internal object VirtualDisplayController {
         rootAvailable: () -> Boolean,
     ) {
         highFrequencyPreview = false
+
+        // 先把让用户看见的界面还回去，再拆虚拟屏。
+        // 顺序很关键：DESTROY_CONTENT_ON_REMOVAL 会连任务一起销毁，
+        // 所以必须在 activeDisplayId 复位与快照清空之前完成迁移。
+        if (CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId) && adoptedPackage.isNotEmpty()) {
+            runCatching {
+                moveVirtualTaskToMainDisplay(
+                    context = context?.applicationContext ?: return@runCatching,
+                    displayId = activeDisplayId,
+                    packageName = adoptedPackage,
+                    rootAvailable = rootAvailable,
+                )
+            }
+        }
+        val pendingFocus = restoreFocusTaskId
+        restoreFocusTaskId = Display.INVALID_DISPLAY
+        adoptedPackage = ""
+
         activeDisplayId = Display.DEFAULT_DISPLAY
         mutableSnapshots.value = VirtualDisplaySnapshot.Inactive
+
+        // 焦点还原放在状态复位之后：用户看到的是原来的界面，而不是空画布。
+        if (pendingFocus != Display.INVALID_DISPLAY) {
+            restoreMainFocus(pendingFocus)
+        }
 
         if (context != null && mutedPackages.isNotEmpty()) {
             restoreMutedPackages(context.applicationContext, rootAvailable)
@@ -530,6 +566,74 @@ internal object VirtualDisplayController {
         latestFullBitmap = null
         lastUiFrameAtElapsedMs = 0L
     }
+
+
+    /** 读取任务栈，只用于接管前采样与归还；无 Hook 且无 Root 时返回空表，按「无现场」处理。 */
+    private fun mainDisplayTasks(): List<android.app.TaskInfo> = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            HiddenApiBypass.addHiddenApiExemptions(
+                "Landroid/app/ActivityTaskManager",
+                "Landroid/app/IActivityTaskManager",
+            )
+        }
+        val atmClass = Class.forName("android.app.ActivityTaskManager")
+        val service = atmClass.getMethod("getService").invoke(null) ?: return@runCatching emptyList()
+        val getTasks = service.javaClass.methods.firstOrNull { it.name == "getTasks" && it.parameterCount >= 1 }
+        val raw = when (getTasks?.parameterCount) {
+            1 -> getTasks.invoke(service, 50)
+            3 -> getTasks.invoke(service, 50, false, false)
+            4 -> getTasks.invoke(service, 50, false, false, Display.INVALID_DISPLAY)
+            else -> null
+        } as? List<*> ?: emptyList<Any?>()
+        raw.filterIsInstance<android.app.TaskInfo>()
+    }.getOrDefault(emptyList())
+
+    private fun taskDisplayIdOf(task: android.app.TaskInfo): Int = runCatching {
+        android.app.TaskInfo::class.java.getField("displayId").getInt(task)
+    }.getOrDefault(Display.INVALID_DISPLAY)
+
+    private fun taskPackageOf(task: android.app.TaskInfo): String =
+        task.topActivity?.packageName
+            ?: task.baseActivity?.packageName
+            ?: task.baseIntent.component?.packageName
+            ?: task.baseIntent.`package`
+            ?: ""
+
+    /**
+     * 采样「接管前的主屏现场」：当前顶层任务 id，以及目标包是否已跑在主屏上。
+     * 每个虚拟屏会话只采一次，后续多次 launch 不覆盖，否则用户原来的界面就丢了。
+     */
+    private fun captureMainDisplayScene(targetPackage: String) {
+        if (restoreFocusTaskId != Display.INVALID_DISPLAY) return
+        val onMainDisplay = mainDisplayTasks().filter { taskDisplayIdOf(it) == Display.DEFAULT_DISPLAY }
+        val top = onMainDisplay.firstOrNull() ?: return
+        restoreFocusTaskId = top.taskId
+        adoptedPackage = if (targetPackage.isNotBlank() && onMainDisplay.any { taskPackageOf(it) == targetPackage }) {
+            targetPackage
+        } else {
+            ""
+        }
+        AndroidAgentLogger.debug {
+            "Virtual display scene captured: focus=${restoreFocusTaskId} adopted=${adoptedPackage.ifEmpty { "-" }}"
+        }
+    }
+
+    /** 把焦点还原到指定主屏任务；失败静默，不影响释放流程。 */
+    private fun restoreMainFocus(taskId: Int): Boolean = runCatching {
+        val atmClass = Class.forName("android.app.ActivityTaskManager")
+        val service = atmClass.getMethod("getService").invoke(null) ?: return@runCatching false
+        val serviceClass = service.javaClass
+        val focused = serviceClass.methods.firstOrNull { it.name == "setFocusedRootTask" && it.parameterCount == 1 }
+        if (focused != null) {
+            focused.invoke(service, taskId)
+            return@runCatching true
+        }
+        val move = serviceClass.methods.firstOrNull {
+            it.name == "moveRootTaskToDisplay" && it.parameterCount == 2
+        } ?: return@runCatching false
+        move.invoke(service, taskId, Display.DEFAULT_DISPLAY)
+        true
+    }.getOrDefault(false)
 
     private fun onFrameAvailable(reader: ImageReader) {
         val image = try {
