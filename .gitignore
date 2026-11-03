@@ -50,3 +50,6 @@ __pycache__/
 
 # 本地打包/审查产物（技能导出、适配中间件）
 dist/
+
+# CodeGraph 索引（本地代码检索工具，133MB，不入库）
+.codegraph/
