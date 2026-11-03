@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Base64
 import io.github.mangi.eta.agent.model.AgentHttpClient
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -128,25 +130,31 @@ internal object ImageGenClient {
     /**
      * 拉中转站的 `/v1/models`，供设置页直接选模型。
      *
-     * 这里不校验 model 字段：用户往往先有 url+key 才去挑模型名。
+     * suspend + 内部切 IO：这里常被 Compose 的 rememberCoroutineScope（Main）调用，
+     * 直接 http 会 NetworkOnMainThreadException 闪退；把调度决定收在 client 内部，调用方不必当心。
+     * 不校验 model 字段——用户往往先有 url+key 才去挑模型名。
      */
-    fun fetchModels(config: ImageGenConfig): Result<List<String>> {
+    suspend fun fetchModels(config: ImageGenConfig): Result<List<String>> = withContext(Dispatchers.IO) {
         if (config.baseUrl.isBlank() || config.apiKey.isBlank()) {
-            return Result.failure(IllegalStateException("先填 base_url 和 API Key"))
+            return@withContext Result.failure(IllegalStateException("先填 base_url 和 API Key"))
         }
         val request = Request.Builder()
             .url(config.modelsUrl())
             .addHeader("Authorization", "Bearer ${config.apiKey}")
             .get()
             .build()
-        return try {
+        try {
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    return Result.failure(IllegalStateException("HTTP ${response.code}：${text.take(200)}"))
+                    return@withContext Result.failure(
+                        IllegalStateException("HTTP ${response.code}：${text.take(200)}"),
+                    )
                 }
                 val data = JSONObject(text).optJSONArray("data")
-                    ?: return Result.failure(IllegalStateException("响应里没有 data 数组"))
+                    ?: return@withContext Result.failure(
+                        IllegalStateException("响应里没有 data 数组"),
+                    )
                 val ids = buildList {
                     for (i in 0 until data.length()) {
                         data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }?.let(::add)

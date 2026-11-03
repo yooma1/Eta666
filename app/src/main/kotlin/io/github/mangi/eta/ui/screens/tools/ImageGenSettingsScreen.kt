@@ -1,7 +1,10 @@
 package io.github.mangi.eta.ui.screens.tools
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -17,7 +20,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -26,11 +31,15 @@ import io.github.mangi.eta.agent.image.ImageGenClient
 import io.github.mangi.eta.agent.image.ImageGenConfig
 import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.ui.components.EtaPreference
+import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
 import io.github.mangi.eta.ui.components.EtaPreferenceGroup
+import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
 import io.github.mangi.eta.ui.components.EtaSwitchPreference
+import io.github.mangi.eta.ui.components.EtaTextButton
 import io.github.mangi.eta.ui.components.EtaWindowDialog
 import io.github.mangi.eta.ui.components.MiuixScaffoldPage
 import kotlinx.coroutines.launch
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
@@ -51,7 +60,7 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf("") }
-    var keyVisible by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
     var savedHint by remember { mutableStateOf<String?>(null) }
 
     var fetching by remember { mutableStateOf(false) }
@@ -69,8 +78,9 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
         loaded = true
     }
 
-    fun persist(onDone: (() -> Unit)? = null) {
+    fun persist(message: String? = "已保存", onDone: (() -> Unit)? = null) {
         scope.launch {
+            saving = true
             SettingsDataStore.setImageGenSettings(
                 SettingsDataStore.ImageGenSettings(
                     enabled = enabled,
@@ -79,7 +89,8 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
                     model = model.trim(),
                 ),
             )
-            savedHint = "已保存"
+            saving = false
+            savedHint = message
             onDone?.invoke()
         }
     }
@@ -92,7 +103,7 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
             onPick = { id ->
                 model = id
                 showPicker = false
-                persist()
+                persist(message = "已选择 $id")
             },
             onDismiss = { showPicker = false },
         )
@@ -105,18 +116,9 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
     ) {
         if (!loaded) return@MiuixScaffoldPage
 
-        item(key = "note") {
-            Text(
-                text = "填写 OpenAI 兼容中转站。base_url 可写 https://host 或 https://host/v1，" +
-                    "会自动补 /images/generations；模型名可用下面的「从远端拉取」直接选。",
-                style = MiuixTheme.textStyles.footnote1,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-        }
-
+        item(key = "enable_title") { EtaPreferenceGroupTitle("能力") }
         item(key = "enable") {
-            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Column {
                 EtaPreferenceGroup {
                     EtaSwitchPreference(
                         title = "启用生图工具",
@@ -124,92 +126,174 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
                         checked = enabled,
                         onCheckedChange = {
                             enabled = it
-                            persist()
+                            persist(message = if (it) "生图工具已启用" else "生图工具已关闭")
                         },
                     )
                 }
-            }
-        }
-
-        item(key = "fetch") {
-            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                EtaPreferenceGroup {
-                    EtaPreference(
-                        title = if (fetching) "正在拉取模型…" else "从远端拉取模型",
-                        summary = fetchError
-                            ?: "读取 ${baseUrl.trim().ifBlank { "base_url" }} 的 /models 列表，直接选不用手打",
-                        onClick = {
-                            if (fetching) return@EtaPreference
-                            fetchError = null
-                            fetching = true
-                            scope.launch {
-                                val cfg = ImageGenConfig.fromSettings(baseUrl, apiKey, model, enabled)
-                                val result = ImageGenClient.fetchModels(cfg)
-                                fetching = false
-                                result
-                                    .onSuccess { list ->
-                                        models = sortModelsForPicker(list)
-                                        query = ""
-                                        showPicker = true
-                                    }
-                                    .onFailure { fetchError = it.message ?: "拉取失败" }
-                            }
-                        },
-                    )
-                }
-            }
-        }
-
-        item(key = "fields") {
-            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                TextField(
-                    value = baseUrl,
-                    onValueChange = { baseUrl = it },
-                    label = "base_url",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                ImageGenNote(
+                    "只有 base_url、API Key、模型名三项齐全且开关打开时，工具才会出现在模型手里。",
                 )
-                TextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = "API Key",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (keyVisible) VisualTransformation.None
-                    else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { keyVisible = !keyVisible }) {
-                            Icon(
-                                imageVector = if (keyVisible) Icons.Rounded.Visibility
-                                else Icons.Rounded.VisibilityOff,
-                                contentDescription = null,
-                            )
+            }
+        }
+
+        item(key = "conn_title") { EtaPreferenceGroupTitle("中转站") }
+        item(key = "conn") {
+            Column {
+                EtaPreferenceGroup {
+                    ImageGenFieldColumn {
+                        ImageGenField(
+                            label = "base_url",
+                            value = baseUrl,
+                            onChange = { baseUrl = it },
+                        )
+                        ImageGenField(
+                            label = "API Key",
+                            value = apiKey,
+                            secret = true,
+                            onChange = { apiKey = it },
+                        )
+                    }
+                }
+                ImageGenNote("base_url 可写 https://host 或 https://host/v1，会自动补 /images/generations。")
+            }
+        }
+
+        item(key = "model_title") { EtaPreferenceGroupTitle("模型") }
+        item(key = "model") {
+            Column {
+                EtaPreferenceGroup {
+                    ImageGenFieldColumn {
+                        ImageGenField(
+                            label = "模型名",
+                            value = model,
+                            onChange = { model = it },
+                        )
+                    }
+                }
+                ImageGenNote(
+                    "可用下面的「从远端拉取模型」直接选，避免手打模型 id。",
+                )
+            }
+        }
+        item(key = "fetch") {
+            EtaPreferenceGroup {
+                EtaPreference(
+                    title = if (fetching) "正在拉取模型…" else "从远端拉取模型",
+                    summary = fetchError
+                        ?: "读取 /models 列表，选中后自动填入上面的模型名",
+                    enabled = !fetching,
+                    onClick = {
+                        fetchError = null
+                        fetching = true
+                        scope.launch {
+                            val cfg = ImageGenConfig.fromSettings(baseUrl, apiKey, model, enabled)
+                            val result = ImageGenClient.fetchModels(cfg)
+                            fetching = false
+                            result
+                                .onSuccess { list ->
+                                    models = sortModelsForPicker(list)
+                                    query = ""
+                                    showPicker = true
+                                }
+                                .onFailure { fetchError = it.message ?: "拉取失败" }
                         }
                     },
-                )
-                TextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = "模型名（如 gpt-image-1）",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
 
         item(key = "save") {
-            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                EtaPreferenceGroup {
-                    EtaPreference(
-                        title = "保存",
-                        summary = savedHint ?: "保存后下一轮对话即生效",
-                        onClick = {
-                            savedHint = null
-                            persist()
-                        },
+            ImageGenSaveBlock(
+                saving = saving,
+                hint = savedHint,
+                onSave = {
+                    savedHint = null
+                    persist()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ImageGenNote(text: String) {
+    Text(
+        text = text,
+        style = MiuixTheme.textStyles.footnote1,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        modifier = Modifier.padding(horizontal = EtaPreferenceDefaults.SidePadding, vertical = 8.dp),
+    )
+}
+
+@Composable
+private fun ImageGenFieldColumn(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun ImageGenField(
+    label: String,
+    value: String,
+    secret: Boolean = false,
+    onChange: (String) -> Unit,
+) {
+    var visible by rememberSaveable(label) { mutableStateOf(false) }
+    TextField(
+        value = value,
+        onValueChange = onChange,
+        label = label,
+        singleLine = true,
+        maxLines = 1,
+        modifier = Modifier.fillMaxWidth(),
+        visualTransformation = if (secret && !visible) PasswordVisualTransformation()
+        else VisualTransformation.None,
+        trailingIcon = if (secret) {
+            {
+                IconButton(onClick = { visible = !visible }) {
+                    Icon(
+                        imageVector = if (visible) Icons.Rounded.Visibility
+                        else Icons.Rounded.VisibilityOff,
+                        contentDescription = null,
                     )
                 }
             }
+        } else {
+            null
+        },
+    )
+}
+
+@Composable
+private fun ImageGenSaveBlock(
+    saving: Boolean,
+    hint: String?,
+    onSave: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = EtaPreferenceDefaults.SidePadding)
+            .padding(top = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        EtaTextButton(
+            text = if (saving) "保存中…" else "保存",
+            enabled = !saving,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.textButtonColorsPrimary(),
+            onClick = onSave,
+        )
+        hint?.let { message ->
+            Text(
+                text = message,
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
     }
 }
@@ -241,24 +325,39 @@ private fun ModelPickerDialog(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 6.dp),
             )
-            LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
-                items(filtered) { id ->
+            if (filtered.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Text(
-                        text = id,
-                        style = MiuixTheme.textStyles.body2,
-                        color = MiuixTheme.colorScheme.onSurface,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(id) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        text = "没有匹配的模型",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     )
+                }
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(filtered) { id ->
+                        Text(
+                            text = id,
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurface,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(id) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/** 图像类模型排前面：97 个模型里手翻很难找，先把明显能生图的挑出来。 */
+/** 图像类模型排前面：模型多到手翻很难找，先把明显能生图的挑出来。 */
 private val IMAGE_MODEL_HINTS = listOf(
     "image", "dall-e", "dalle", "flux", "nano-banana", "nano_banana",
     "seedream", "seededit", "kling", "kolors", "qwen-image", "imagen",
