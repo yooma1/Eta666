@@ -24,6 +24,7 @@ import io.github.mangi.eta.core.safeStackTrace
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
 import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
+import io.github.mangi.eta.ui.model.GeneratedImageMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.SystemNoticeCode
 import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
@@ -403,6 +404,15 @@ internal object AgentConversationStore {
                 isEdited = isEdited,
             )
 
+            is GeneratedImageMessageUi -> ConversationMessageEntity(
+                id = id,
+                conversationId = conversationId,
+                sortIndex = sortIndex,
+                type = TYPE_GENERATED_IMAGE,
+                content = caption,
+                imagesJson = images.toJsonArrayString(),
+            )
+
             is AgentMessageUi -> {
                 if (content.isBlank() && isStreaming) {
                     null
@@ -475,6 +485,12 @@ internal object AgentConversationStore {
                 content = content,
                 images = imagesJson.toStringList(),
                 isEdited = isEdited,
+            )
+
+            TYPE_GENERATED_IMAGE -> GeneratedImageMessageUi(
+                id = id,
+                images = imagesJson.toStringList(),
+                caption = content,
             )
 
             TYPE_ASSISTANT -> AgentMessageUi(
@@ -573,6 +589,7 @@ internal object AgentConversationStore {
     private const val TYPE_THINKING = "thinking"
     private const val TYPE_TOOL = "tool"
     private const val TYPE_TOOL_SUMMARY = "tool_summary"
+    private const val TYPE_GENERATED_IMAGE = "generated_image"
     private const val MESSAGE_LOAD_PAGE_SIZE = 128
     private const val LEGACY_UNNAMED_TITLE = "新对话"
 }

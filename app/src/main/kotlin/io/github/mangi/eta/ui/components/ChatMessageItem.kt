@@ -102,6 +102,7 @@ import io.github.mangi.eta.ui.model.SystemNoticeMessageUi
 import io.github.mangi.eta.ui.model.ThinkingMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolSummaryMessageUi
+import io.github.mangi.eta.ui.model.GeneratedImageMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 import io.github.mangi.eta.ui.voice.SpeechReadAloudButton
 import kotlinx.coroutines.delay
@@ -242,6 +243,10 @@ internal fun ChatMessageItem(
             isEditing = isEditing,
             onEdit = { onEditMessage(message.id) },
             onDelete = { onDeleteMessage(message.id) },
+            modifier = modifier,
+        )
+        is GeneratedImageMessageUi -> GeneratedImageBlock(
+            message = message,
             modifier = modifier,
         )
         is AgentMessageUi -> AgentMessageBlock(
@@ -1192,6 +1197,57 @@ private fun SuggestionChipsRow(
  * 状态放在这里而不是提到 ChatMessageItem 顶层：一个消息可能有多张图，各自点开时
  * 需要知道「点的是哪一张」，而这个状态只被这一行用，提上去只会让参数变长。
  */
+/**
+ * 生成图展示。
+ *
+ * 与 [MessageImageRow]（用户附件 100dp 缩略图、贴气泡）区分开：这里是助手侧产物，
+ * 左对齐、按可用宽度铺满一小块，点开看原图。放在回复下方而不是气泡里，
+ * 是因为它不属于任何一方的"发言"。
+ */
+@Composable
+private fun GeneratedImageBlock(
+    message: GeneratedImageMessageUi,
+    modifier: Modifier = Modifier,
+) {
+    var viewedImage by remember { mutableStateOf<String?>(null) }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        message.images.forEach { dataUrl ->
+            // 展示档比缩略图大：生成图是内容本身，看太糊就没有意义。
+            val bitmap = rememberDataUrlBitmap(dataUrl, GENERATED_IMAGE_MAX_PIXELS)
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = stringResource(R.string.chat_image_attachment),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(interactionSource = null, indication = null) {
+                            viewedImage = dataUrl
+                        },
+                    contentScale = ContentScale.Fit,
+                )
+            }
+        }
+        if (message.caption.isNotBlank()) {
+            Text(
+                text = message.caption,
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
+    }
+    ImageViewerDialog(dataUrl = viewedImage, onDismiss = { viewedImage = null })
+}
+
+/** 生成图的展示像素上限：比缩略图大一个量级，又不至于把内存吃满。 */
+private const val GENERATED_IMAGE_MAX_PIXELS = 2_000_000L
+
 @Composable
 private fun MessageImageRow(images: List<String>) {
     var viewedImage by remember { mutableStateOf<String?>(null) }

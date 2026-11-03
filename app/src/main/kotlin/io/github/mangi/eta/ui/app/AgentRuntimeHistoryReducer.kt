@@ -3,6 +3,7 @@ package io.github.mangi.eta.ui.app
 import io.github.mangi.eta.agent.model.AgentContextSnapshot
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.ui.model.AgentChatHomeUiState
+import io.github.mangi.eta.ui.model.GeneratedImageMessageUi
 import io.github.mangi.eta.ui.model.UserMessageUi
 
 /** live result 与 outbox recovery 共用的 history 幂等提交点。 */
@@ -44,10 +45,10 @@ internal object AgentRuntimeHistoryReducer {
         val generatedMessages = additions
             .filter { it.generatedImages || it.messageId.startsWith(GENERATED_IMAGE_ID_PREFIX) }
             .map { message ->
-                UserMessageUi(
+                GeneratedImageMessageUi(
                     id = message.messageId.ifBlank { "generated-image-${message.hashCode()}" },
-                    content = message.content,
                     images = imageReferencesOf(message),
+                    caption = "",
                 )
             }
         val knownIds = state.messages.mapTo(mutableSetOf()) { it.id }
