@@ -8,7 +8,6 @@ import android.view.DragAndDropPermissions
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -27,9 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draganddrop.DragAndDropEvent
-import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.toAndroidDragEvent
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -125,32 +122,68 @@ internal fun IncomingContentHost(
         ).show()
     }
 
-    val target = remember(model, context) {
-        object : DragAndDropTarget {
-            override fun onEntered(event: DragAndDropEvent) { hovering = true }
-            override fun onExited(event: DragAndDropEvent) { hovering = false }
-            override fun onEnded(event: DragAndDropEvent) { hovering = false }
-            override fun onDrop(event: DragAndDropEvent): Boolean {
-                hovering = false
-                if (!currentReady) return false
-                val androidEvent = event.toAndroidDragEvent()
-                val payload = androidEvent.clipData?.let(IncomingContentParser::fromClipData) ?: return false
-                val permission = runCatching {
-                    context.findActivity()?.requestDragAndDropPermissions(androidEvent)
-                }.getOrNull()
-                model.import(payload, permission)
-                return true
-            }
-        }
-    }
     CompositionLocalProvider(LocalIncomingDraft provides bridge) {
-        Box(
-            Modifier.fillMaxSize().dragAndDropTarget(
-                shouldStartDragAndDrop = { currentReady },
-                target = target,
-            ),
-        ) {
+        Box(Modifier.fillMaxSize()) {
             content()
+            // 原生拖拽接收层。
+            //
+            // Compose 的 dragAndDropTarget 在 startTransfer 阶段按 ClipDescription 的
+            // MIME 过滤，ColorOS 文件管理拖非图片文件时声明不规范，手势进不了目标
+            // （表现为"只能拖图片"）。用一个铺满的透明原生 View 接管：Android 的
+            // View.OnDragListener 不做 MIME 预过滤，只要 ACTION_DRAG_STARTED 返回 true，
+            // 后续 DRAG_ENTERED / DROP 都会送达。可用性判断交给 parser。
+            AndroidView(
+                factory = { ctx ->
+                    android.view.View(ctx).apply {
+                        isClickable = false
+                        isFocusable = false
+                        // 只做拖拽接收，绝不能抢触摸：铺满的透明 View 若参与命中测试，
+                        // 输入框、按钮会全部点不动。返回 false 让手势穿透到下层 Compose。
+                        // 触摸一律不消费，让它穿透到下层 Compose；
+                        // 注意不能用 isEnabled=false —— 禁用状态的 View 收不到拖拽事件。
+                        setOnTouchListener { _, _ -> false }
+                        setOnDragListener { _, event ->
+                            when (event.action) {
+                                android.view.DragEvent.ACTION_DRAG_STARTED -> {
+                                    // 声明可接收一切；真正的取舍在 DROP。
+                                    if (currentReady) {
+                                        hovering = true
+                                    }
+                                    currentReady
+                                }
+                                android.view.DragEvent.ACTION_DRAG_ENTERED -> {
+                                    hovering = currentReady
+                                    currentReady
+                                }
+                                android.view.DragEvent.ACTION_DRAG_EXITED,
+                                android.view.DragEvent.ACTION_DRAG_ENDED -> {
+                                    hovering = false
+                                    true
+                                }
+                                android.view.DragEvent.ACTION_DROP -> {
+                                    hovering = false
+                                    if (!currentReady) return@setOnDragListener false
+                                    val payload = event.clipData
+                                        ?.let(IncomingContentParser::fromClipData)
+                                        ?: IncomingContentParser.fromDragDescription(event)
+                                    if (payload == null) {
+                                        false
+                                    } else {
+                                        val permission = runCatching {
+                                            context.findActivity()
+                                                ?.requestDragAndDropPermissions(event)
+                                        }.getOrNull()
+                                        model.import(payload, permission)
+                                        true
+                                    }
+                                }
+                                else -> false
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.matchParentSize(),
+            )
             if (hovering && ready) {
                 Box(
                     Modifier.matchParentSize()

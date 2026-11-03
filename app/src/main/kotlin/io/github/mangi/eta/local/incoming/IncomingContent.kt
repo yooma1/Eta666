@@ -64,6 +64,36 @@ internal object IncomingContentParser {
         return collector.build(mime)
     }
 
+    /**
+     * 兜底：从 DragEvent 的 ClipDescription 里取 uri-list。
+     *
+     * 部分文件管理器（含 ColorOS 文件管理）拖拽时只把 URI 放进描述或 localState，
+     * ClipData 为空。这时若直接 return false，用户看到的就是"拖了没反应"。
+     */
+    fun fromDragDescription(event: android.view.DragEvent): IncomingPayload? {
+        val collector = Collector()
+        try {
+            val desc = event.clipDescription
+            if (desc != null && !desc.hasMimeType("text/uri-list")) {
+                // 描述里没有 uri-list 也不立刻放弃：可能只是 MIME 声明不规范。
+            }
+        } catch (_: RuntimeException) {
+            collector.skipped++
+        }
+        // localState 里常见的是 Uri 或 Uri 列表。
+        try {
+            when (val state = event.localState) {
+                is Uri -> collector.addUri(state)
+                is Array<*> -> state.forEach { if (it is Uri) collector.addUri(it) }
+                is List<*> -> state.forEach { if (it is Uri) collector.addUri(it) }
+            }
+        } catch (_: RuntimeException) {
+            collector.skipped++
+        }
+        val mime = runCatching { event.clipDescription?.getMimeType(0) }.getOrNull()
+        return collector.build(mime)
+    }
+
     private class Collector {
         private val texts = linkedSetOf<String>()
         private val uris = linkedSetOf<Uri>()
