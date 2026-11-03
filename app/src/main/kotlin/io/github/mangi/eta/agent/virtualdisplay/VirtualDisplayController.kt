@@ -81,6 +81,9 @@ internal object VirtualDisplayController {
     private var restoreFocusTaskId: Int = Display.INVALID_DISPLAY
     private var adoptedPackage: String = ""
 
+    /** 供 root 桥采样时定位 APK 路径；随每次 ensureVirtualDisplay 刷新。 */
+    private var lastAppContext: Context? = null
+
     fun isBackendAvailable(rootAvailable: Boolean, lsposedAvailable: Boolean): Boolean =
         rootAvailable || lsposedAvailable
 
@@ -114,6 +117,7 @@ internal object VirtualDisplayController {
             }
         }
         val appContext = context.applicationContext
+        lastAppContext = appContext
         val (width, height, densityDpi) = resolvePhysicalDisplayMetrics(appContext)
         synchronized(lock) {
             if (CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId) && imageReader != null) {
@@ -197,7 +201,7 @@ internal object VirtualDisplayController {
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
         val appContext = context.applicationContext
         // 采样必须在启动之前：一旦任务被迁到虚拟屏，主屏顶层就变成 Eta 自己了。
-        captureMainDisplayScene(packageName)
+        captureMainDisplayScene(packageName, rootAvailable)
         mutePackageAudioFocusIfPossible(appContext, packageName, rootAvailable)
 
         val startedInProcess = runCatching {
@@ -262,7 +266,7 @@ internal object VirtualDisplayController {
     ): Int? {
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
         val appContext = context.applicationContext
-        captureMainDisplayScene(intent.component?.packageName.orEmpty())
+        captureMainDisplayScene(intent.component?.packageName.orEmpty(), rootAvailable)
         val started = runCatching {
             val launch = Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
@@ -568,8 +572,11 @@ internal object VirtualDisplayController {
     }
 
 
-    /** 读取任务栈，只用于接管前采样与归还；无 Hook 且无 Root 时返回空表，按「无现场」处理。 */
-    private fun mainDisplayTasks(): List<android.app.TaskInfo> = runCatching {
+    /**
+     * 读取任务栈。返回 null 表示「读不到」（App 进程没有 GET_TASKS，且没有 Hook 放行），
+     * 与「读到了但为空」严格区分——前者要回退 root 桥并留痕，后者才是真的没有现场。
+     */
+    private fun mainDisplayTasks(): List<android.app.TaskInfo>? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             HiddenApiBypass.addHiddenApiExemptions(
                 "Landroid/app/ActivityTaskManager",
@@ -584,9 +591,9 @@ internal object VirtualDisplayController {
             3 -> getTasks.invoke(service, 50, false, false)
             4 -> getTasks.invoke(service, 50, false, false, Display.INVALID_DISPLAY)
             else -> null
-        } as? List<*> ?: emptyList<Any?>()
+        } as? List<*> ?: return@runCatching null
         raw.filterIsInstance<android.app.TaskInfo>()
-    }.getOrDefault(emptyList())
+    }.getOrNull()
 
     private fun taskDisplayIdOf(task: android.app.TaskInfo): Int = runCatching {
         android.app.TaskInfo::class.java.getField("displayId").getInt(task)
@@ -603,19 +610,87 @@ internal object VirtualDisplayController {
      * 采样「接管前的主屏现场」：当前顶层任务 id，以及目标包是否已跑在主屏上。
      * 每个虚拟屏会话只采一次，后续多次 launch 不覆盖，否则用户原来的界面就丢了。
      */
-    private fun captureMainDisplayScene(targetPackage: String) {
+    private fun captureMainDisplayScene(targetPackage: String, rootAvailable: () -> Boolean) {
         if (restoreFocusTaskId != Display.INVALID_DISPLAY) return
-        val onMainDisplay = mainDisplayTasks().filter { taskDisplayIdOf(it) == Display.DEFAULT_DISPLAY }
-        val top = onMainDisplay.firstOrNull() ?: return
+
+        // App 进程的 getTasks 是受限视图：能拿到列表，但 displayId 之类字段不保证填充，
+        // 据此判断主屏现场会得出"没有主屏任务"的错误结论。有 root 时一律以 root 桥为准。
+        if (rootAvailable()) {
+            val viaBridge = captureSceneViaRootBridge(targetPackage, rootAvailable)
+            if (viaBridge != null) {
+                restoreFocusTaskId = viaBridge.first
+                adoptedPackage = viaBridge.second
+                AndroidAgentLogger.info(
+                    "Virtual display scene captured via bridge: focus=$restoreFocusTaskId " +
+                        "adopted=${adoptedPackage.ifEmpty { "-" }}"
+                )
+                return
+            }
+            AndroidAgentLogger.warn("Virtual display scene capture: root bridge unavailable, trying in-process")
+        }
+
+        val tasks = mainDisplayTasks()
+        if (tasks == null) {
+            AndroidAgentLogger.warn("Virtual display scene capture unavailable: cannot read task stack")
+            return
+        }
+
+        val onMainDisplay = tasks.filter { taskDisplayIdOf(it) == Display.DEFAULT_DISPLAY }
+        val top = onMainDisplay.firstOrNull()
+        if (top == null) {
+            // 记录原始读数，避免把"读不到 displayId"误判成"没有主屏任务"。
+            AndroidAgentLogger.warn(
+                "Virtual display scene capture: no task on main display " +
+                    "(raw=${tasks.size}, displayIds=${tasks.take(6).joinToString(",") { taskDisplayIdOf(it).toString() }})"
+            )
+            return
+        }
         restoreFocusTaskId = top.taskId
         adoptedPackage = if (targetPackage.isNotBlank() && onMainDisplay.any { taskPackageOf(it) == targetPackage }) {
             targetPackage
         } else {
             ""
         }
-        AndroidAgentLogger.debug {
-            "Virtual display scene captured: focus=${restoreFocusTaskId} adopted=${adoptedPackage.ifEmpty { "-" }}"
-        }
+        AndroidAgentLogger.info(
+            "Virtual display scene captured: focus=$restoreFocusTaskId " +
+                "adopted=${adoptedPackage.ifEmpty { "-" }}"
+        )
+    }
+
+    /** 走 root 桥采样主屏现场，返回 (focusTaskId, adoptedPackage)；失败返回 null。 */
+    private fun captureSceneViaRootBridge(
+        targetPackage: String,
+        rootAvailable: () -> Boolean,
+    ): Pair<Int, String>? {
+        if (!rootAvailable()) return null
+        return runCatching {
+            val apkPath = lastAppContext?.applicationInfo?.sourceDir ?: return@runCatching null
+            val cmd = "CLASSPATH=${DeviceToolContract.quote(apkPath)} app_process /system/bin " +
+                "io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayCommandMain"
+            val req = JSONObject()
+                .put("action", "capture_scene")
+                .put("package_name", targetPackage)
+                .toString() + "\n"
+            val supervisor = ShellProcessSupervisor(rootAvailable = rootAvailable)
+            val proc = supervisor.startShellProcess("root", cmd, mergeStderr = true) ?: return@runCatching null
+            try {
+                proc.outputStream.write(req.toByteArray(Charsets.UTF_8))
+                proc.outputStream.flush()
+                proc.outputStream.close()
+                val out = proc.inputStream.bufferedReader().readText()
+                proc.waitFor(4, TimeUnit.SECONDS)
+                val json = out.substringAfter("ETA_VD_RESULT:", "").trim().ifEmpty { return@runCatching null }
+                val obj = JSONObject(json.substringBefore("\n"))
+                if (!obj.optBoolean("ok")) return@runCatching null
+                val focus = obj.optInt("focus_task_id", Display.INVALID_DISPLAY)
+                if (focus == Display.INVALID_DISPLAY) return@runCatching null
+                focus to obj.optString("adopted_package")
+            } finally {
+                supervisor.beginClosing()
+                if (proc.isAlive) supervisor.terminateAndReap(proc) else supervisor.reapProcess(proc)
+                supervisor.unregisterProcess(proc)
+            }
+        }.getOrNull()
     }
 
     /** 把焦点还原到指定主屏任务；失败静默，不影响释放流程。 */

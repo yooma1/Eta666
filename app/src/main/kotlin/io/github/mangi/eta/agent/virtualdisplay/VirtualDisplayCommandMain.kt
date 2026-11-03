@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.virtualdisplay
 
+import android.app.TaskInfo
 import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
@@ -86,6 +87,11 @@ internal object VirtualDisplayCommandMain {
                 "hold_display" -> holdVirtualDisplay(request, reader)
                 "move_to_main" -> {
                     val result = moveTaskToMainDisplay(request)
+                    println(RESULT_PREFIX + result.toString())
+                    exitProcess(0)
+                }
+                "capture_scene" -> {
+                    val result = captureMainScene(request)
                     println(RESULT_PREFIX + result.toString())
                     exitProcess(0)
                 }
@@ -267,6 +273,51 @@ internal object VirtualDisplayCommandMain {
         }
     }.getOrNull()
 
+    /**
+     * 采样主屏现场：顶层任务 id，以及目标包是否已经在主屏上。
+     *
+     * 必须走 root/system 桥——App 进程没有 GET_TASKS，进程内反射会被静默拒绝，
+     * 那样「采样失败」和「本来就没有现场」就分不清了。
+     */
+    private fun captureMainScene(request: JSONObject): JSONObject {
+        val targetPackage = request.optString("package_name").trim()
+        val tasks = readTasks() ?: return JSONObject().put("ok", false).put("code", "TASKS_UNAVAILABLE")
+        val displayField = TaskInfo::class.java.getField("displayId")
+        val onMain = tasks.filter { runCatching { displayField.getInt(it) }.getOrDefault(Display.INVALID_DISPLAY) == Display.DEFAULT_DISPLAY }
+        val top = onMain.firstOrNull() ?: return JSONObject().put("ok", false).put("code", "NO_MAIN_TASK")
+        val adopted = if (targetPackage.isNotEmpty() && onMain.any { packageOf(it) == targetPackage }) {
+            targetPackage
+        } else {
+            ""
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("focus_task_id", top.taskId)
+            .put("adopted_package", adopted)
+    }
+
+    private fun packageOf(task: TaskInfo): String =
+        task.topActivity?.packageName
+            ?: task.baseActivity?.packageName
+            ?: task.baseIntent?.component?.packageName
+            ?: task.baseIntent?.`package`
+            ?: ""
+
+    private fun readTasks(): List<TaskInfo>? = runCatching {
+        val atmClass = Class.forName("android.app.ActivityTaskManager")
+        val service = atmClass.getMethod("getService").invoke(null) ?: return@runCatching null
+        val getTasks = service.javaClass.methods.firstOrNull {
+            it.name == "getTasks" && it.parameterCount >= 1
+        } ?: return@runCatching null
+        val raw = when (getTasks.parameterCount) {
+            1 -> getTasks.invoke(service, 50)
+            3 -> getTasks.invoke(service, 50, false, false)
+            4 -> getTasks.invoke(service, 50, false, false, Display.INVALID_DISPLAY)
+            else -> null
+        } as? List<*> ?: return@runCatching null
+        raw.filterIsInstance<TaskInfo>()
+    }.getOrNull()
+
     private fun moveTaskToMainDisplay(request: JSONObject): JSONObject {
         val displayId = request.optInt("display_id", Display.INVALID_DISPLAY)
         val targetPackage = request.optString("package_name").trim()
@@ -288,6 +339,8 @@ internal object VirtualDisplayCommandMain {
         }.getOrNull().orEmpty()
 
         var matchedTaskId = -1
+        // 记下匹配任务的真实所在屏：判断「已经不需要迁移」必须靠它，不能只看异常文本。
+        var matchedTaskDisplayId = Display.INVALID_DISPLAY
         for (item in rawTasks) {
             val taskInfo = item as? android.app.TaskInfo ?: continue
             val taskDisplayId = runCatching {
@@ -299,8 +352,13 @@ internal object VirtualDisplayCommandMain {
                 ?: taskInfo.baseIntent.`package`
             val displayMatches = displayId > 0 && taskDisplayId == displayId
             val pkgMatches = targetPackage.isNotEmpty() && topPkg == targetPackage
-            if (displayMatches || pkgMatches) {
+            // 指定了 display 时只认该屏上的任务：同包名可能同时存在主屏任务
+            // （例如 com.android.settings 与 com.android.settings.root），
+            // 按包名乱匹配会把本来就在主屏的那个当成要归还的对象。
+            val eligible = if (displayId > 0) displayMatches else pkgMatches
+            if (eligible) {
                 matchedTaskId = taskInfo.taskId
+                matchedTaskDisplayId = taskDisplayId
                 if (displayMatches && pkgMatches) break
             }
         }
@@ -313,15 +371,53 @@ internal object VirtualDisplayCommandMain {
             it.name == "moveRootTaskToDisplay" && it.parameterCount == 2
         } ?: return JSONObject().put("ok", false).put("code", "MOVE_METHOD_NOT_FOUND")
 
-        moveMethod.invoke(service, matchedTaskId, Display.DEFAULT_DISPLAY)
+        // 迁移本身是必要条件；焦点切换只是锦上添花，绝不能让它把成功变成失败。
+        var moved = false
+        var moveError = ""
+        try {
+            moveMethod.invoke(service, matchedTaskId, Display.DEFAULT_DISPLAY)
+            moved = true
+        } catch (t: Throwable) {
+            moveError = (t.cause ?: t).javaClass.simpleName + ": " + ((t.cause ?: t).message ?: "")
+        }
+        // 已经在主屏上的任务不需要迁移；系统会以 IllegalArgumentException 拒绝，
+        // 这是正常结果而不是失败——否则每次「本来就在主屏」的归还都会被当成错误。
+        if (!moved) {
+            // 「已经不需要迁移」的唯一可信依据是任务确实位于目标屏；
+            // 只看异常文本会把调度失败也当成成功，留下没迁走的任务和空壳虚拟屏。
+            val alreadyOnMain = matchedTaskDisplayId == Display.DEFAULT_DISPLAY
+            if (alreadyOnMain) {
+                return JSONObject()
+                    .put("ok", true)
+                    .put("task_id", matchedTaskId)
+                    .put("target_display_id", Display.DEFAULT_DISPLAY)
+                    .put("already_on_main", true)
+            }
+            return JSONObject()
+                .put("ok", false)
+                .put("code", "MOVE_FAILED")
+                .put("task_display_id", matchedTaskDisplayId)
+                .put("detail", moveError.take(200))
+        }
+        // 焦点恢复失败不影响迁移结果：不同 Android 版本该方法签名与权限都变了。
+        var focusError = ""
         runCatching {
-            serviceClass.methods.firstOrNull {
+            val focusMethod = serviceClass.methods.firstOrNull {
                 it.name == "setFocusedRootTask" && it.parameterCount == 1
-            }?.invoke(service, matchedTaskId)
+            }
+            if (focusMethod == null) {
+                focusError = "SET_FOCUS_METHOD_NOT_FOUND"
+            } else {
+                focusMethod.invoke(service, matchedTaskId)
+            }
+        }.onFailure { t ->
+            focusError = (t.cause ?: t).javaClass.simpleName + ": " + ((t.cause ?: t).message ?: "")
         }
         return JSONObject()
             .put("ok", true)
             .put("task_id", matchedTaskId)
             .put("target_display_id", Display.DEFAULT_DISPLAY)
+            .put("focus_restored", focusError.isEmpty())
+            .put("focus_error", focusError.take(200))
     }
 }
