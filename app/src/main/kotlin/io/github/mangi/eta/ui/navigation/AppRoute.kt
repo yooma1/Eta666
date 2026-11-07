@@ -19,6 +19,12 @@ sealed interface AppRoute : NavKey {
     data object Tools : AppRoute
 
     @Serializable
+    data object PromptTools : AppRoute
+
+    @Serializable
+    data object PromptToolGroups : AppRoute
+
+    @Serializable
     data object WebToolsSettings : AppRoute
 
     @Serializable

@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.model
 
+import io.github.mangi.eta.agent.prompt.AgentToolPolicyStore
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
@@ -212,11 +213,13 @@ internal object AgentModelClient {
             return filtered
         }
         val tools = toolsFor(initialCapabilities)
+        val toolPolicy = AgentToolPolicyStore.load()
+        val policyFilteredTools = toolPolicy.filterTools(tools)
         onEvent(
             AgentEvent.RunStarted(
                 initialImages = images.size,
                 initialImageBytes = images.sumOf { it.bytes },
-                toolCount = tools.length(),
+                toolCount = policyFilteredTools.length(),
                 terminalTools = config.terminalTools
             )
         )
@@ -258,20 +261,27 @@ internal object AgentModelClient {
             sessionId = sessionId,
             config = config,
             messages = messages,
-            tools = tools,
+            tools = policyFilteredTools,
             provider = provider,
             // 目录在运行内只增不减，可见不再等于可用：执行前用同一规则复核，
             // 中途失去的能力返回与目录过滤一致的错误码，而不是让底层接口给出含糊的失败。
             toolExecutor = AgentModelClient.ToolExecutor { call ->
-                val unavailable = AgentToolRequirements.find(call.name)
-                    ?.let { capabilitiesProvider().unavailableCode(call.name) }
-                if (unavailable == null) {
-                    toolExecutor.execute(call)
-                } else {
+                if (!toolPolicy.allows(call.name)) {
                     ToolResult(
-                        JSONObject().put("ok", false).put("code", unavailable)
-                            .put("message", "该工具当前不可用（$unavailable），本次未执行").toString(),
+                        JSONObject().put("ok", false).put("code", "TOOL_NOT_ALLOWED_BY_POLICY")
+                            .put("message", "该工具不在本次工具白名单中，未执行").toString(),
                     )
+                } else {
+                    val unavailable = AgentToolRequirements.find(call.name)
+                        ?.let { capabilitiesProvider().unavailableCode(call.name) }
+                    if (unavailable == null) {
+                        toolExecutor.execute(call)
+                    } else {
+                        ToolResult(
+                            JSONObject().put("ok", false).put("code", unavailable)
+                                .put("message", "该工具当前不可用（$unavailable），本次未执行").toString(),
+                        )
+                    }
                 }
             },
             runController = runController,

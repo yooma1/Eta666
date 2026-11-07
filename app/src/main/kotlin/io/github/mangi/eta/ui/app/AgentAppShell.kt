@@ -422,6 +422,8 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.Home, is AppRoute.Browser -> ""
     is AppRoute.Terminal -> stringResource(R.string.route_terminal)
     is AppRoute.Tools -> stringResource(R.string.route_tools)
+    is AppRoute.PromptTools -> stringResource(R.string.prompt_studio_tools_title)
+    is AppRoute.PromptToolGroups -> stringResource(R.string.prompt_groups_title)
     is AppRoute.WebToolsSettings -> stringResource(R.string.web_tools_settings_title)
     is AppRoute.ImageGenSettings -> "生图"
     is AppRoute.Subagent -> stringResource(R.string.subagent_page_title)

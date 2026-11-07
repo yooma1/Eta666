@@ -43,6 +43,7 @@ import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.TravelExplore
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.runtime.Composable
@@ -539,6 +540,19 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.CompactionSettings) },
+                    )
+
+                    EtaPreferenceDivider()
+                    EtaArrowPreference(
+                        title = stringResource(R.string.prompt_studio_tools_title),
+                        summary = "工具边界白名单、功能/权限分类与组合管理",
+                        startAction = {
+                            EtaPreferenceIcon(
+                                icon = Icons.Rounded.Tune,
+                                tint = EtaPreferenceColors.Orange,
+                            )
+                        },
+                        onClick = { onNavigate(AppRoute.PromptTools) },
                     )
 
                     EtaPreferenceDivider()

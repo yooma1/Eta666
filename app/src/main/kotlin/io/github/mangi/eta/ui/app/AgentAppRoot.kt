@@ -836,6 +836,15 @@ fun AgentAppRoot(
             entry<AppRoute.CompactionSettings>(swipeDismiss = swipeDismiss) {
                 io.github.mangi.eta.local.compaction.CompactionSettingsScreen(onBack = ::popRoute)
             }
+            entry<AppRoute.PromptTools>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptToolsScreen(
+                    onBack = ::popRoute,
+                    onManageGroups = { pushRoute(AppRoute.PromptToolGroups) },
+                )
+            }
+            entry<AppRoute.PromptToolGroups>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.ui.screens.prompts.PromptToolGroupsScreen(onBack = ::popRoute)
+            }
             entry<AppRoute.SharedFolders>(swipeDismiss = swipeDismiss) {
                 SharedFoldersScreen(
                     context = context,
