@@ -690,6 +690,7 @@ internal class AgentRuntimeRunExecutor(
             fun runModelAttempt(modelConfig: AgentModelClient.ModelConfig): AgentModelClient.ModelResponse.Text =
                 AgentModelClient.complete(
                     config = modelConfig,
+                    compactionTarget = { runBlocking { io.github.mangi.eta.data.repository.RuntimeConfigRepository.compactionTarget(modelConfig) } },
                     sessionId = request.effectiveModelSessionId,
                     operationId = request.runId,
                     initialUserMessageId = uiPayload?.promptMessageId(request.runId) ?: "user-${request.runId}",

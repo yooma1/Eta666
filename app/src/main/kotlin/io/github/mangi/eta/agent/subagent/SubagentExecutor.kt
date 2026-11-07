@@ -10,6 +10,7 @@ import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
@@ -176,6 +177,7 @@ internal class SubagentExecutor(
         return try {
             val response = AgentModelClient.complete(
                 config = subagentConfig,
+                compactionTarget = { runBlocking { io.github.mangi.eta.data.repository.RuntimeConfigRepository.compactionTarget(subagentConfig) } },
                 prompt = prompt,
                 toolExecutor = childToolExecutor,
                 history = priorHistory,

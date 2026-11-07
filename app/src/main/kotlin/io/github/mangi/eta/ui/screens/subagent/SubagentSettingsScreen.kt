@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Extension
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,6 +106,11 @@ private data class CustomSubagentDraft(
 internal fun SubagentSettingsScreen(
     onBack: () -> Unit,
 ) {
+    var showCompactionSettings by rememberSaveable { mutableStateOf(false) }
+    if (showCompactionSettings) {
+        io.github.mangi.eta.local.compaction.CompactionSettingsScreen(onBack = { showCompactionSettings = false })
+        return
+    }
     val scope = rememberCoroutineScope()
     val agentPrefs = remember { Prefs.localAgentPreferences() }
     val defaultEnabled = Prefs.Keys.BOOLEAN_DEFAULTS.getValue(Prefs.Keys.AGENT_SUBAGENT_ENABLED)
@@ -414,6 +421,18 @@ internal fun SubagentSettingsScreen(
                         },
                     )
                 }
+                EtaPreferenceDivider()
+                EtaArrowPreference(
+                    title = "上下文压缩",
+                    summary = "主/子代理统一的压缩模型、思考强度和摘要提示词",
+                    startAction = {
+                        EtaPreferenceIcon(
+                            icon = Icons.Rounded.Compress,
+                            tint = EtaPreferenceColors.Green,
+                        )
+                    },
+                    onClick = { showCompactionSettings = true },
+                )
             }
         }
 
@@ -495,7 +514,7 @@ private fun tintForProfile(name: String) = when (name) {
 }
 
 @Composable
-private fun SubagentModelPickerContent(
+internal fun SubagentModelPickerContent(
     pickerState: io.github.mangi.eta.ui.model.AgentModelPickerUiState,
     selectedSecondaryModelId: String?,
     primaryModelName: String?,

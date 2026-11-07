@@ -833,6 +833,9 @@ fun AgentAppRoot(
             entry<AppRoute.Subagent>(swipeDismiss = swipeDismiss) {
                 SubagentSettingsScreen(onBack = ::popRoute)
             }
+            entry<AppRoute.CompactionSettings>(swipeDismiss = swipeDismiss) {
+                io.github.mangi.eta.local.compaction.CompactionSettingsScreen(onBack = ::popRoute)
+            }
             entry<AppRoute.SharedFolders>(swipeDismiss = swipeDismiss) {
                 SharedFoldersScreen(
                     context = context,

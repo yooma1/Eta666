@@ -17,6 +17,7 @@ internal class AgentContextSession(
     private val onContextSnapshot: (AgentContextSnapshot) -> Unit,
     private val transcriptSize: () -> Int = { 0 },
     private val roleplay: Boolean = false,
+    private val compactionTarget: (() -> AgentCompactionTarget)? = null,
 ) {
     private val contextWindow = config.knownContextWindow
 
@@ -85,7 +86,11 @@ internal class AgentContextSession(
         val operation = java.util.UUID.randomUUID().toString()
         onEvent(AgentEvent.ContextCompaction(operation, AgentEvent.ContextCompaction.PHASE_STARTED, before))
         try {
-            val candidate = AgentContextCompactor(config, provider, runController, roleplay = roleplay).compact(
+            val target = compactionTarget?.invoke() ?: AgentCompactionTarget(config, provider)
+            val candidate = AgentContextCompactor(
+                target.config, target.provider, runController,
+                roleplay = roleplay, summaryPrompt = target.prompt,
+            ).compact(
                 messages, systemCount, sensitiveIds(),
             )
             runController.throwIfCancelled()

@@ -41,6 +41,7 @@ internal class AgentLoop(
     private val purpose: ProviderRequestPurpose = ProviderRequestPurpose.CHAT,
     private val roleplayContext: RoleplayRunContext? = null,
     initialSupplementIndex: Int = 0,
+    private val compactionTarget: (() -> AgentCompactionTarget)? = null,
     /** 持续目标正文；非空时模型自然收尾后会自动续跑，直到达成、被取消或触及上限。 */
     private val goal: String = "",
     /** 当前子任务清单进度；有清单时以清单为完成依据，而不是模型自己的说法。 */
@@ -72,6 +73,7 @@ internal class AgentLoop(
         config, messages, systemCount, operationId, provider, runController,
         { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
         roleplay = roleplayContext != null,
+        compactionTarget = compactionTarget,
     )
     private var supplementIndex = initialSupplementIndex
 

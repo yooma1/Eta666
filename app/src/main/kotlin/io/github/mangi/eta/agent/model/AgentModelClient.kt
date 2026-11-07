@@ -121,6 +121,7 @@ internal object AgentModelClient {
         rewriteReply: Boolean = false,
         assistantScreenContext: String = "",
         toolFilter: ((JSONArray) -> JSONArray)? = null,
+        compactionTarget: (() -> AgentCompactionTarget)? = null,
         userPrompt: AgentUserPromptSnapshot = AgentUserPromptSnapshot.EMPTY,
         /** 红队模式协议全文；空串表示未开启。 */
         redteamProtocol: String = "",
@@ -249,6 +250,7 @@ internal object AgentModelClient {
         }
         val loop = AgentLoop(
             transcript = transcript,
+            compactionTarget = compactionTarget,
             systemCount = systemCount,
             operationId = operationId,
             onContextSnapshot = if (rewriteReply) ({ _ -> }) else onContextSnapshot,
