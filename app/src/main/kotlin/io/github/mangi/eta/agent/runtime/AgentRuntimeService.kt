@@ -380,7 +380,19 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
                 runId = request.runId,
                 operation = request.operation,
                 eventSink = { event -> sendEventTo(replyTo, event) },
-                resultSink = { result -> sendResultTo(replyTo, result) },
+                resultSink = { result ->
+                    sendResultTo(replyTo, result)
+                    if (request.operation != AgentRuntimeWire.OP_COMPACT) {
+                        TaskCompletionNotifier.show(
+                            context = this,
+                            ok = result.ok,
+                            detail = if (result.ok) result.content.trim() else result.error.orEmpty(),
+                            stopped = !result.ok && result.error == "已停止",
+                            conversationId = request.effectiveModelSessionId,
+                            runId = request.runId,
+                        )
+                    }
+                },
                 beforeTerminalPublish = {
                     runs.finish(request.runId, session)?.releaseIncoming()
                     AgentExecutionService.release("run:${request.runId}")
