@@ -4,6 +4,8 @@ import io.github.mangi.eta.ui.voice.SpeechDictationButton
 import io.github.mangi.eta.ui.voice.SpeechInputFeedback
 import io.github.mangi.eta.ui.voice.rememberSpeechInput
 import androidx.compose.ui.text.TextRange
+import io.github.mangi.eta.agent.subagent.SubagentRunRegistry
+import kotlinx.coroutines.delay
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -183,6 +185,16 @@ internal fun AgentChatInputBar(
     }.minus(ChatInputPopupMargin * 2)
         .coerceAtLeast(ListPopupDefaults.MinPopupHeight)
 
+    // 有子智能体在跑时，输入框上方出现「发给」目标胶囊；选中后发送只投给它，不进父对话流。
+    var liveSubagentIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedSubagent by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            liveSubagentIds = SubagentRunRegistry.liveIds()
+            delay(1000)
+        }
+    }
+
     LaunchedEffect(isEditingMessage, inputSyncVersion) {
         // 编辑态与排队消息撤回由外部业务状态驱动；普通输入只保留在本地，避免每个字符把聊天舞台
         // 的消息流、滚动和 Markdown 一起带入重组。
@@ -290,6 +302,47 @@ internal fun AgentChatInputBar(
                     )
                     .padding(horizontal = 10.dp, vertical = 8.dp),
             ) {
+                if (liveSubagentIds.isNotEmpty()) {
+                    val current = selectedSubagent?.takeIf { it in liveSubagentIds }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val options = buildList {
+                            add(null to "父 Agent")
+                            liveSubagentIds.take(3).forEach { id -> add(id to id.takeLast(6)) }
+                        }
+                        options.forEach { (id, label) ->
+                            val active = current == id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(
+                                        if (active) {
+                                            MiuixTheme.colorScheme.primary
+                                        } else {
+                                            MiuixTheme.colorScheme.surfaceContainerHigh
+                                        },
+                                    )
+                                    .clickable { selectedSubagent = id }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MiuixTheme.textStyles.footnote2,
+                                    color = if (active) {
+                                        MiuixTheme.colorScheme.onPrimary
+                                    } else {
+                                        MiuixTheme.colorScheme.onSurfaceVariantSummary
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -397,7 +450,10 @@ internal fun AgentChatInputBar(
                                 dictation.cancel()
                                 val submittedText = textFieldState.text.toString()
                                 textFieldState.clearText()
-                                if (interrupt) {
+                                val target = selectedSubagent?.takeIf { it in liveSubagentIds }
+                                if (target != null) {
+                                    SubagentRunRegistry.steer(target, submittedText)
+                                } else if (interrupt) {
                                     onInterruptAndSubmit(submittedText)
                                 } else {
                                     onSubmit(submittedText)

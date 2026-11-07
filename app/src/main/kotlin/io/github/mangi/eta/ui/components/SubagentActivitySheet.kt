@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -40,6 +41,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.LaunchedEffect
+import io.github.mangi.eta.agent.subagent.SubagentRunRegistry
+import kotlinx.coroutines.delay
+import top.yukonga.miuix.kmp.basic.TextField
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot
 import io.github.mangi.eta.agent.subagent.SubagentStepSnapshot
@@ -235,13 +240,119 @@ private fun SubagentInspectorContent(
             }
             if (snapshot.model.isNotBlank()) {
                 Text(
-                    text = "· ${snapshot.model}",
+                    text = buildString {
+                        append("· ")
+                        append(snapshot.model)
+                        if (snapshot.effort.isNotBlank()) {
+                            append(" · ")
+                            append(snapshot.effort)
+                        }
+                    },
                     style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.75f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+            }
+        }
+
+        // 运行中可以直接给它下指令：走它自己的 steering 通道，下一个回合边界生效。
+        if (running) {
+            var steerText by rememberSaveable(snapshot.subagentId) { mutableStateOf("") }
+            var steerNotice by rememberSaveable(snapshot.subagentId) { mutableStateOf<String?>(null) }
+            // 暂停状态以注册表为准：面板关掉再打开时不能把「继续执行」重置回「暂停」。
+            var paused by remember(snapshot.subagentId) {
+                mutableStateOf(SubagentRunRegistry.isPaused(snapshot.subagentId))
+            }
+            LaunchedEffect(snapshot.subagentId) {
+                while (true) {
+                    paused = SubagentRunRegistry.isPaused(snapshot.subagentId)
+                    delay(1000)
+                }
+            }
+            var pauseNotice by rememberSaveable(snapshot.subagentId) { mutableStateOf<String?>(null) }
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    EtaTextButton(
+                        text = if (paused) "继续执行" else "暂停",
+                        onClick = {
+                            val ok = if (paused) {
+                                SubagentRunRegistry.resume(snapshot.subagentId)
+                            } else {
+                                SubagentRunRegistry.pause(snapshot.subagentId)
+                            }
+                            if (ok) {
+                                paused = !paused
+                                pauseNotice = if (paused) "已暂停，检查完点「继续执行」" else "已继续执行"
+                            } else {
+                                // 注册表里找不到，不代表面板里的状态就是准的：快照可能已经过期。
+                                paused = false
+                                pauseNotice = "这条子代理已结束，或面板状态已过期；关掉重新点开可刷新"
+                            }
+                        },
+                    )
+                    Text(
+                        text = if (paused) {
+                            "已暂停：它停在检查点，不会自己往下走"
+                        } else {
+                            "暂停后在下一个检查点停住，进度不丢"
+                        },
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                pauseNotice?.let { notice ->
+                    Text(
+                        text = notice,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.primary,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TextField(
+                        value = steerText,
+                        onValueChange = {
+                            steerText = it.take(500)
+                            steerNotice = null
+                        },
+                        label = "对它说一句（下一轮生效）",
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    EtaTextButton(
+                        text = "发送",
+                        enabled = steerText.isNotBlank(),
+                        onClick = {
+                            val delivered = SubagentRunRegistry.steer(snapshot.subagentId, steerText)
+                            steerNotice = if (delivered) {
+                                "已送达，下一轮生效"
+                            } else {
+                                "它已经结束了，这条没送出去"
+                            }
+                            if (delivered) steerText = ""
+                        },
+                    )
+                }
+                steerNotice?.let { notice ->
+                    Text(
+                        text = notice,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.primary,
+                    )
+                }
             }
         }
 

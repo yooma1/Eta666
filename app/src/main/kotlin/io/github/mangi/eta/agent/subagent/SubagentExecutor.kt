@@ -99,6 +99,14 @@ internal class SubagentExecutor(
         val childController = AgentRunController()
         val controllerBinding = parentController.register(childController::cancel)
 
+        // 登记到注册表：支持通过输入框/面板定向下发指令（邮箱通道）与暂停/继续
+        SubagentRunRegistry.register(
+            conversationKey = conversationKey,
+            subagentId = subagentId,
+            controller = childController,
+            ownsScreen = profile.isToolAllowed("observe_screen"),
+        )
+
         val resolvedConfig = runCatching { configProvider() }.getOrElse { throwable ->
             SubagentSessionStore.releaseRunning(conversationKey, subagentId)
             controllerBinding.close()
@@ -121,6 +129,7 @@ internal class SubagentExecutor(
             lastEmitNanos = now
             val encoded = tracker.snapshot().encode()
             latestSnapshots[toolCall.id] = encoded
+            SubagentRunRegistry.publishSnapshot(subagentId, toolCall.id, encoded)
             onProgress(
                 AgentEvent.SubagentProgress(
                     round = parentRound,
@@ -158,6 +167,12 @@ internal class SubagentExecutor(
             supportsSearchSuggestions = false,
         )
 
+        val maxRounds = 40
+        val failureAbort = 5
+        var abortCode: String? = null
+        var abortReason: String? = null
+        var consecutiveFailures = 0
+
         return try {
             val response = AgentModelClient.complete(
                 config = subagentConfig,
@@ -174,6 +189,32 @@ internal class SubagentExecutor(
                 operationId = "${toolCall.id}-$subagentId",
                 toolFilter = profile::filterTools,
                 onEvent = { childEvent ->
+                    if (abortCode == null) {
+                        when (childEvent) {
+                            is AgentEvent.ToolStarted -> {
+                                if (childEvent.round > maxRounds) {
+                                    abortCode = "SUBAGENT_ROUND_LIMIT"
+                                    abortReason = "已到轮次上限（$maxRounds 轮），子智能体被自动中止。"
+                                    childController.cancel()
+                                }
+                            }
+
+                            is AgentEvent.ToolFinished -> {
+                                if (childEvent.success == false) {
+                                    consecutiveFailures += 1
+                                } else {
+                                    consecutiveFailures = 0
+                                }
+                                if (failureAbort > 0 && consecutiveFailures >= failureAbort) {
+                                    abortCode = "SUBAGENT_FAILURE_ABORT"
+                                    abortReason = "连续 $consecutiveFailures 次工具调用失败（最后一次：${childEvent.name}），判断为无法推进，子智能体被自动中止。"
+                                    childController.cancel()
+                                }
+                            }
+
+                            else -> Unit
+                        }
+                    }
                     val force = tracker.onChildEvent(childEvent)
                     publishSnapshot(force = force)
                 },
@@ -217,10 +258,10 @@ internal class SubagentExecutor(
             val cancelled = parentController.isCancelled ||
                 childController.isCancelled ||
                 throwable is AgentRunCancelledException
-            val errorMessage = if (cancelled) {
-                "已停止"
-            } else {
-                throwable.message ?: throwable.javaClass.simpleName
+            val errorMessage = when {
+                abortReason != null -> abortReason
+                cancelled -> "已停止"
+                else -> throwable.message ?: throwable.javaClass.simpleName
             }
             if (cancelled) {
                 tracker.markCancelled(partial)
@@ -236,7 +277,7 @@ internal class SubagentExecutor(
             AgentModelClient.ToolResult(
                 content = JSONObject()
                     .put("ok", false)
-                    .put("code", if (cancelled) "SUBAGENT_CANCELLED" else "SUBAGENT_FAILED")
+                    .put("code", abortCode ?: if (cancelled) "SUBAGENT_CANCELLED" else "SUBAGENT_FAILED")
                     .put("subagent_id", subagentId)
                     .put("subagent_type", profile.name)
                     .put("description", description)
@@ -263,6 +304,7 @@ internal class SubagentExecutor(
                 command = latestSnapshots[toolCall.id],
             )
         } finally {
+            SubagentRunRegistry.unregister(subagentId)
             controllerBinding.close()
         }
     }
