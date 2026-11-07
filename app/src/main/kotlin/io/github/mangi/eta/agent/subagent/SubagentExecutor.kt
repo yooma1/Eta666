@@ -456,6 +456,14 @@ internal class SubagentExecutor(
                     true
                 }
 
+                is AgentEvent.ModelRetryScheduled -> {
+                    // 失败尝试只留作步骤记录，不拼进后续的部分汇报。
+                    roundTexts.remove(event.round)
+                    finishAllRunningSteps(SubagentStepSnapshot.STATUS_FAILED)
+                    currentAction = event.displayMessage
+                    true
+                }
+
                 is AgentEvent.AssistantBlockDelta -> when (event.kind) {
                     AgentEvent.AssistantBlockKind.THINKING -> {
                         val stepId = "thinking-${event.round}-${event.index}"
