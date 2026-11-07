@@ -69,6 +69,19 @@ internal object VirtualDisplayCommandMain {
     const val READY_PREFIX = "ETA_VD_READY:"
     const val RESULT_PREFIX = "ETA_VD_RESULT:"
 
+    private fun initApplicationSharedMemory() {
+        val cls = runCatching {
+            Class.forName("com.android.internal.os.ApplicationSharedMemory")
+        }.getOrNull() ?: return
+        if (runCatching { cls.getMethod("getInstance").invoke(null) }.isSuccess) {
+            return
+        }
+        runCatching {
+            val instance = cls.getMethod("create").invoke(null)
+            cls.getMethod("setInstance", cls).invoke(null, instance)
+        }
+    }
+
     @JvmStatic
     @Suppress("DEPRECATION")
     fun main(args: Array<String>) {
@@ -79,6 +92,8 @@ internal object VirtualDisplayCommandMain {
                 exitProcess(1)
             }
             if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
+            // Android 17 (SDK 37+)：特权子进程未走 bindApplication，需初始化 ApplicationSharedMemory 避免 IWindowManager 缓存报 IllegalStateException
+            initApplicationSharedMemory()
             val reader = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
             val firstLine = reader.readLine()?.trim().orEmpty()
             if (firstLine.isEmpty()) exitProcess(1)

@@ -86,10 +86,9 @@ internal data class AgentToolCapabilities(
                     AccessibilityProtectionClient.isEnabled(context),
                 notificationsAllowed = AgentNotificationHistoryService.isEnabled(context),
                 usageAllowed = AgentPersonalContextTools.hasUsageAccess(context),
-                locationAllowed = context.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
-                    PackageManager.PERMISSION_GRANTED &&
-                    (context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-                        context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED),
+                // 读取最近位置只需要前台定位权限；后台定位不是这个工具的前置条件。
+                locationAllowed = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED,
                 colorOs = isColorOsDevice(),
                 calendarReadable = io.github.mangi.eta.agent.device.CalendarPermissions.granted(context, false),
                 calendarWritable = io.github.mangi.eta.agent.device.CalendarPermissions.granted(context, true),

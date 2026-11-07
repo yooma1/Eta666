@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.markdown
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -50,10 +51,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextMotion
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -157,21 +164,74 @@ private fun MarkdownText(
     modifier: Modifier = Modifier,
     softWrap: Boolean = true,
 ) {
+    val rawText = block.text
+    val linkColor = MiuixTheme.colorScheme.primary
+    val context = LocalContext.current
+    val pathRanges = remember(rawText) {
+        rawText.spanStyles
+            .filter { it.item.fontFamily == FontFamily.Monospace }
+            .mapNotNull { span ->
+                var start = span.start
+                var end = span.end - 1
+                while (start <= end && rawText.text[start].isWhitespace()) start++
+                while (end >= start && rawText.text[end].isWhitespace()) end--
+                if (start > end) null else start..end
+            }
+            .mapNotNull { range ->
+                val raw = rawText.text.substring(range.first, range.last + 1)
+                MarkdownPathLinks.resolve(raw)?.let { range to it }
+            }
+    }
+    val renderText = remember(rawText, linkColor, pathRanges) {
+        if (pathRanges.isEmpty()) rawText else AnnotatedString.Builder(rawText).apply {
+            pathRanges.forEach { (range, _) ->
+                addStyle(
+                    SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
+                    range.first,
+                    range.last + 1,
+                )
+            }
+        }.toAnnotatedString()
+    }
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val pathTapModifier = if (pathRanges.isEmpty()) {
+        Modifier
+    } else {
+        Modifier.pointerInput(pathRanges) {
+            detectTapGestures { position ->
+                val layout = textLayout ?: return@detectTapGestures
+                val offset = layout.getOffsetForPosition(position)
+                pathRanges.firstOrNull { (range, _) -> offset in range }?.let { (_, path) ->
+                    MarkdownPathLinks.open(context, path)
+                }
+            }
+        }
+    }
+
     val reveal = scope.reveal
     // 空单元格没有可显现的文字，也不占用显现协调器的 key。
     if (reveal == null || block.text.isEmpty()) {
-        Text(text = block.text, style = style, softWrap = softWrap, modifier = modifier)
+        Text(
+            text = renderText,
+            style = style,
+            softWrap = softWrap,
+            modifier = modifier.then(pathTapModifier),
+            onTextLayout = { layout -> textLayout = layout },
+        )
         return
     }
     val revealState = rememberSmoothTextRevealState(block.revealKey, reveal)
     // 显现裁剪按字素边界逐帧变化，关闭像素对齐可避免裁剪边缘抖动。
     val animatedStyle = remember(style) { style.copy(textMotion = TextMotion.Animated) }
     Text(
-        text = block.text,
+        text = renderText,
         style = animatedStyle,
         softWrap = softWrap,
-        modifier = modifier.smoothTextReveal(revealState),
-        onTextLayout = { layout -> revealState.onTextLayout(block.text.text, layout) },
+        modifier = modifier.smoothTextReveal(revealState).then(pathTapModifier),
+        onTextLayout = { layout ->
+            textLayout = layout
+            revealState.onTextLayout(renderText.text, layout)
+        },
     )
 }
 
