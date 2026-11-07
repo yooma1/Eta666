@@ -18,6 +18,7 @@ import io.github.mangi.eta.agent.overlay.AgentOverlayStatus
 import io.github.mangi.eta.agent.overlay.localizedText
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.local.runtime.ExecutionKeepAlive
 import io.github.mangi.eta.ui.MainActivity
 import java.util.concurrent.atomic.AtomicLong
 
@@ -29,23 +30,14 @@ internal class AgentExecutionService : Service() {
     private val owner = ownerSequence.incrementAndGet()
     private var foregroundActive = false
 
-    /** 执行期间持有；服务销毁时释放。锁屏后靠它维持 CPU，否则流式响应会被休眠掐断。 */
-    private var wakeLock: PowerManager.WakeLock? = null
+    /** 执行期间持有；服务销毁或空闲时释放。维持 CPU 与 Wi-Fi 高性能工作，避免息屏省电掐断长连接。 */
+    private val keepAlive by lazy(LazyThreadSafetyMode.NONE) { ExecutionKeepAlive(this) }
     @Volatile private var startRejected = false
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         leases.attachOwner(owner)
-        // 锁屏后屏幕虽然关着，前台服务仍在；但 CPU 会休眠，模型流式响应与网络请求
-        // 会被挂起，表现就是"锁屏后卡住"。只在本服务存活期间持 PARTIAL_WAKE_LOCK
-        // （服务只在有执行租约时才存在），并带超时兜底，防止异常路径残留耗电。
-        wakeLock = getSystemService(PowerManager::class.java)
-            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
-            ?.apply {
-                setReferenceCounted(false)
-                runCatching { acquire(WAKE_LOCK_TIMEOUT_MS) }
-            }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, getString(R.string.execution_channel), NotificationManager.IMPORTANCE_LOW),
@@ -63,6 +55,7 @@ internal class AgentExecutionService : Service() {
                 startForeground(NOTIFICATION_ID, notification())
             }
             foregroundActive = true
+            keepAlive.acquire()
         } catch (failure: RuntimeException) {
             startRejected = true
             AndroidAgentLogger.warn("Execution service foreground failed: type=${failure.safeLogType()}")
@@ -84,11 +77,9 @@ internal class AgentExecutionService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
-        // 先放唤醒锁再收任务：任务回收可能还要跑几秒，不该让 CPU 一直醒着。
-        wakeLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
-        wakeLock = null
-        // 销毁时同样收回本服务拥有的任务。回收在独立有界工作线程上完成，不阻塞 Main。
+        // 销毁时释放 CPU 唤醒锁与 Wi-Fi 锁，并收回本服务拥有的任务。
         stopQueue.close(leases.drainOwner(owner))
+        keepAlive.release()
         super.onDestroy()
     }
 
@@ -102,6 +93,7 @@ internal class AgentExecutionService : Service() {
     private fun refreshNotification() {
         if (leases.closeOwnerIfIdle(owner)) {
             foregroundActive = false
+            keepAlive.release()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         } else {
