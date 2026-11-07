@@ -28,6 +28,7 @@ import io.github.mangi.eta.agent.terminal.ApkAnalysisInstallProgress
 import io.github.mangi.eta.agent.terminal.ApkAnalysisInstallResult
 import io.github.mangi.eta.agent.terminal.ApkAnalysisInstallStage
 import io.github.mangi.eta.agent.terminal.DebianEnvironmentInstaller
+import io.github.mangi.eta.agent.terminal.LinuxInstallRunner
 import io.github.mangi.eta.agent.terminal.DebianEnvironmentState
 import io.github.mangi.eta.agent.terminal.DebianInstallProgress
 import io.github.mangi.eta.agent.terminal.DebianInstallResult
@@ -204,7 +205,11 @@ internal fun LinuxEnvironmentScreen(
         LinuxDistribution.DEBIAN -> debianStatus.state == DebianEnvironmentState.READY
     }
 
-    fun launchInstallation(block: suspend () -> Unit) {
+    fun launchInstallation(title: String, block: suspend () -> Unit) {
+        if (!LinuxInstallRunner.tryAdopt(title)) {
+            resultMessage = "已有安装任务在后台进行，完成后再试"
+            return
+        }
         val operation: suspend () -> Unit = {
             try {
                 block()
@@ -214,20 +219,18 @@ internal fun LinuxEnvironmentScreen(
                 profileProgressSummary = null
                 apkAnalysisProgress = null
                 busyTarget = null
+                LinuxInstallRunner.release()
             }
         }
-        if (backend == LinuxExecutionBackend.PROOT) {
-            requestExecutionNotifications()
-            coroutineScope.launchForegroundExecution(
-                context = appContext,
-                onUnavailable = {
-                    busyTarget = null
-                    resultMessage = context.getString(R.string.capability_background_failed)
-                },
-                block = operation,
-            )
-        } else {
-            coroutineScope.launch { operation() }
+        // 安装跑在进程级作用域：退出设置页、切后台都不再中断下载。
+        requestExecutionNotifications()
+        val job = LinuxInstallRunner.scope.launchForegroundExecution(
+            context = appContext,
+            onUnavailable = { /* 前台不可用不阻塞：下面退回普通执行 */ },
+            block = operation,
+        )
+        if (job == null) {
+            LinuxInstallRunner.scope.launch { operation() }
         }
     }
 
@@ -235,13 +238,19 @@ internal fun LinuxEnvironmentScreen(
         if (busyTarget != null || requiresRoot) return
         busyTarget = InstallTarget.BASE
         resultMessage = null
-        launchInstallation {
+        launchInstallation("安装基础工具") {
             resultMessage = when (selectedDistribution) {
                 LinuxDistribution.ALPINE -> installer.installBase { update ->
-                    withContext(Dispatchers.Main.immediate) { progress = update }
+                    withContext(Dispatchers.Main.immediate) {
+                        progress = update
+                        LinuxInstallRunner.updateDetail(update.summary(context))
+                    }
                 }.toMessage(context)
                 LinuxDistribution.DEBIAN -> debianInstaller.installBase { update ->
-                    withContext(Dispatchers.Main.immediate) { debianProgress = update }
+                    withContext(Dispatchers.Main.immediate) {
+                        debianProgress = update
+                        LinuxInstallRunner.updateDetail(update.summary(context))
+                    }
                 }.toMessage(context)
             }
             status = installer.status()
@@ -256,13 +265,19 @@ internal fun LinuxEnvironmentScreen(
         if (busyTarget != null || requiresRoot) return
         busyTarget = InstallTarget.TOOLS
         resultMessage = null
-        launchInstallation {
+        launchInstallation("安装扩展工具") {
             resultMessage = when (selectedDistribution) {
                 LinuxDistribution.ALPINE -> installer.installTools { update ->
-                    withContext(Dispatchers.Main.immediate) { progress = update }
+                    withContext(Dispatchers.Main.immediate) {
+                        progress = update
+                        LinuxInstallRunner.updateDetail(update.summary(context))
+                    }
                 }.toMessage(context)
                 LinuxDistribution.DEBIAN -> debianInstaller.installTools { update ->
-                    withContext(Dispatchers.Main.immediate) { debianProgress = update }
+                    withContext(Dispatchers.Main.immediate) {
+                        debianProgress = update
+                        LinuxInstallRunner.updateDetail(update.summary(context))
+                    }
                 }.toMessage(context)
             }
             status = installer.status()
@@ -292,6 +307,9 @@ internal fun LinuxEnvironmentScreen(
         }
     }
 
+    // 安装跑在进程级作用域后，页面重建也要能把「后台正在装」显示出来。
+    val hostedInstall by LinuxInstallRunner.state.collectAsState()
+
     MiuixScaffoldPage(
         title = stringResource(R.string.ui_linux_tool_environment_314d22),
         onBack = onBack,
@@ -301,7 +319,9 @@ internal fun LinuxEnvironmentScreen(
                 LinuxDistribution.ALPINE -> status.version
                 LinuxDistribution.DEBIAN -> debianStatus.version
             }
-            val activeProgress = when (busyTarget) {
+            val activeProgress = hostedInstall?.detail
+                ?: hostedInstall?.title
+                ?: when (busyTarget) {
                 InstallTarget.BASE, InstallTarget.TOOLS -> when (selectedDistribution) {
                     LinuxDistribution.ALPINE -> progress?.summary(context)
                     LinuxDistribution.DEBIAN -> debianProgress?.summary(context)
@@ -316,7 +336,8 @@ internal fun LinuxEnvironmentScreen(
                 summary = when {
                     requiresRoot -> stringResource(R.string.capability_linux_root_lost)
                     kimiWebLaunching -> stringResource(R.string.linux_kimi_web_starting)
-                    busyTarget != null -> activeProgress ?: stringResource(R.string.linux_installing)
+                    hostedInstall != null || busyTarget != null ->
+                        activeProgress ?: stringResource(R.string.linux_installing)
                     selectedToolsReady -> stringResource(R.string.linux_environment_tools_ready)
                     selectedBaseReady -> stringResource(R.string.linux_environment_base_ready)
                     else -> stringResource(R.string.linux_not_installed) + "\n" + stringResource(
@@ -327,16 +348,16 @@ internal fun LinuxEnvironmentScreen(
                         },
                     )
                 },
-                busy = busyTarget != null || kimiWebLaunching,
+                busy = hostedInstall != null || busyTarget != null || kimiWebLaunching,
                 message = resultMessage,
                 actionText = when {
                     requiresRoot -> stringResource(R.string.capability_enhancements)
                     selectedToolsReady -> null
-                    busyTarget != null -> stringResource(R.string.linux_installing)
+                    hostedInstall != null || busyTarget != null -> stringResource(R.string.linux_installing)
                     selectedBaseReady -> stringResource(R.string.linux_install_base_tools)
                     else -> stringResource(R.string.linux_install_base)
                 },
-                actionEnabled = busyTarget == null && !kimiWebLaunching,
+                actionEnabled = hostedInstall == null && busyTarget == null && !kimiWebLaunching,
                 onAction = {
                     if (requiresRoot) onNavigate(AppRoute.SystemEnhance)
                     else if (selectedBaseReady) installTools() else installBase()
@@ -458,7 +479,7 @@ internal fun LinuxEnvironmentScreen(
                                         busyTarget == profileUi.target -> stringResource(R.string.linux_installing)
                                         else -> stringResource(R.string.linux_install)
                                     },
-                                    enabled = !requiresRoot && if (isKimi && ready) {
+                                    enabled = !requiresRoot && hostedInstall == null && if (isKimi && ready) {
                                         !kimiWebLaunching && busyTarget == null
                                     } else {
                                         busyTarget == null && !ready
@@ -468,15 +489,16 @@ internal fun LinuxEnvironmentScreen(
                                             launchKimiWeb()
                                             return@EtaTextButton
                                         }
-                                        if (busyTarget != null || ready) return@EtaTextButton
+                                        if (busyTarget != null || ready || hostedInstall != null) return@EtaTextButton
                                         busyTarget = profileUi.target
                                         resultMessage = null
                                         val profileTitle = context.getString(profileUi.titleRes)
-                                        launchInstallation {
+                                        launchInstallation(profileTitle) {
                                             val profileInstaller = profileInstallers.getValue(profileUi.target)
                                             val result = profileInstaller.install { update ->
                                                 withContext(Dispatchers.Main.immediate) {
                                                     profileProgressSummary = update.summary(context, profileTitle)
+                                                    LinuxInstallRunner.updateDetail(profileProgressSummary)
                                                 }
                                             }
                                             profileReady = profileReady +
@@ -502,18 +524,19 @@ internal fun LinuxEnvironmentScreen(
                             EtaTextButton(
                                 text = when {
                                     apkAnalysisReady -> context.getString(R.string.linux_installed)
-                                    busyTarget == InstallTarget.APK_ANALYSIS -> context.getString(R.string.linux_installing)
+                                    busyTarget == InstallTarget.APK_ANALYSIS || hostedInstall != null -> context.getString(R.string.linux_installing)
                                     else -> context.getString(R.string.linux_install)
                                 },
-                                enabled = busyTarget == null && !requiresRoot && !apkAnalysisReady,
+                                enabled = busyTarget == null && hostedInstall == null && !requiresRoot && !apkAnalysisReady,
                                 onClick = {
-                                    if (busyTarget != null || apkAnalysisReady) return@EtaTextButton
+                                    if (busyTarget != null || apkAnalysisReady || hostedInstall != null) return@EtaTextButton
                                     busyTarget = InstallTarget.APK_ANALYSIS
                                     resultMessage = null
-                                    launchInstallation {
+                                    launchInstallation("下载 APK 分析工具") {
                                         val result = apkAnalysisInstaller.install { update ->
                                             withContext(Dispatchers.Main.immediate) {
                                                 apkAnalysisProgress = update
+                                                LinuxInstallRunner.updateDetail(update.summary(context))
                                             }
                                         }
                                         apkAnalysisReady = apkAnalysisInstaller.isReady()

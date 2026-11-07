@@ -121,6 +121,8 @@ fun AgentAppRoot(
     openSpeechSettings: Boolean = false,
     openTerminal: Boolean = false,
     onTerminalOpened: () -> Unit = {},
+    openLinuxEnvironment: Boolean = false,
+    onLinuxEnvironmentOpened: () -> Unit = {},
     onSpeechSettingsOpened: () -> Unit = {},
     onAssistantConversationOpened: (Boolean) -> Unit = {},
 ) {
@@ -138,6 +140,12 @@ fun AgentAppRoot(
         if (openTerminal) {
             if (backStack.lastOrNull() != AppRoute.Terminal) backStack.add(AppRoute.Terminal)
             onTerminalOpened()
+        }
+    }
+    LaunchedEffect(openLinuxEnvironment) {
+        if (openLinuxEnvironment) {
+            if (backStack.lastOrNull() != AppRoute.LinuxEnvironment) backStack.add(AppRoute.LinuxEnvironment)
+            onLinuxEnvironmentOpened()
         }
     }
     val navigator = remember(backStack) { AgentNavigator(backStack) }

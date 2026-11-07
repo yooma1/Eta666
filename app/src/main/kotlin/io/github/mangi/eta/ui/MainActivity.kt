@@ -82,6 +82,11 @@ class MainActivity : ComponentActivity() {
                             launchRequests = launchRequests.copy(terminal = false)
                             intent?.action = null
                         },
+                        openLinuxEnvironment = launchRequests.linuxEnvironment,
+                        onLinuxEnvironmentOpened = {
+                            launchRequests = launchRequests.copy(linuxEnvironment = false)
+                            intent?.action = null
+                        },
                         onSpeechSettingsOpened = {
                             launchRequests = launchRequests.copy(speechSettings = false)
                             intent?.action = null
@@ -183,6 +188,7 @@ class MainActivity : ComponentActivity() {
             private set
 
         const val ACTION_OPEN_TERMINAL = "io.github.mangi.eta.action.OPEN_TERMINAL"
+        const val ACTION_OPEN_LINUX_ENVIRONMENT = "io.github.mangi.eta.action.OPEN_LINUX_ENVIRONMENT"
         /** 运行浮层的结果卡片回到本体：App 发起的 run 带会话 ID，直接打开该会话。 */
         const val ACTION_OPEN_CONVERSATION_ID = "io.github.mangi.eta.action.OPEN_CONVERSATION_ID"
         const val EXTRA_CONVERSATION_ID = "io.github.mangi.eta.extra.CONVERSATION_ID"
