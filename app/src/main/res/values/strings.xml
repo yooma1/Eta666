@@ -1513,4 +1513,6 @@
   <string name="task_completion_capsule_ok">已完成</string>
   <string name="task_completion_capsule_fail">失败</string>
   <string name="task_completion_capsule_stopped">已停止</string>
+  <string name="lingscreen_return_title">正在真机上操作</string>
+  <string name="lingscreen_return_body">正在前台操作 %1$s，点此返回 Eta 智能画布</string>
 </resources>

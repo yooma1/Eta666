@@ -1,8 +1,13 @@
 package io.github.mangi.eta.agent.virtualdisplay
 
 import android.app.ActivityOptions
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Point
@@ -26,6 +31,8 @@ import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.terminal.ShellProcessSupervisor
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.R
+import io.github.mangi.eta.ui.MainActivity
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.CountDownLatch
@@ -344,8 +351,61 @@ internal object VirtualDisplayController {
             Thread.currentThread().interrupt()
         }
 
+        if (moved) {
+            val label = snapshot.appName.ifBlank { snapshot.packageName }
+            showReturnToLingscreen(appContext, label)
+        }
+
         release(appContext, rootAvailable)
         return moved
+    }
+
+    private const val RETURN_CHANNEL = "eta_lingscreen_return"
+    private const val RETURN_ID = 1112
+
+    /**
+     * 「回到灵屏」常驻通知：从虚拟屏跳到真机后挂出来，点它回到 Eta。
+     */
+    fun showReturnToLingscreen(context: Context, appNameOrPkg: String) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        runCatching {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    RETURN_CHANNEL,
+                    "回到灵屏",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ),
+            )
+            val open = PendingIntent.getActivity(
+                context,
+                RETURN_ID,
+                Intent(context, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val target = appNameOrPkg.ifBlank { "应用" }
+            manager.notify(
+                RETURN_ID,
+                Notification.Builder(context, RETURN_CHANNEL)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setContentTitle(context.getString(R.string.lingscreen_return_title))
+                    .setContentText(context.getString(R.string.lingscreen_return_body, target))
+                    .setCategory(Notification.CATEGORY_STATUS)
+                    .setOngoing(true)
+                    .setContentIntent(open)
+                    .build(),
+            )
+        }
+    }
+
+    fun dismissReturnToLingscreen(context: Context) {
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)?.cancel(RETURN_ID)
+        }
     }
 
     /**
@@ -493,6 +553,7 @@ internal object VirtualDisplayController {
         context: Context?,
         rootAvailable: () -> Boolean,
     ) {
+        context?.let { dismissReturnToLingscreen(it.applicationContext) }
         highFrequencyPreview = false
 
         // 先把让用户看见的界面还回去，再拆虚拟屏。
