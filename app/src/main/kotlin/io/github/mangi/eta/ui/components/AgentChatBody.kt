@@ -100,6 +100,7 @@ import io.github.mangi.eta.ui.model.UserMessageUi
 import io.github.mangi.eta.ui.model.latestContextUsage
 import io.github.mangi.eta.ui.voice.SpeechAutoReadAloud
 import io.github.mangi.eta.ui.voice.SpeechPlaybackHost
+import androidx.compose.ui.platform.LocalScrollCaptureInProgress
 import kotlin.math.exp
 import kotlin.math.min
 import kotlinx.coroutines.CancellationException
@@ -533,6 +534,9 @@ internal fun AgentConversationMessages(
     }
     val earlierMessagesItemCount = if (hasEarlierMessages) 1 else 0
     val bottomItemIndex = timelineEntries.size + earlierMessagesItemCount
+    // 系统长截屏（ScrollCapture）期间必须停掉跟底与历史分页：
+    // 否则每滚一屏都会被「回到最新」拉回尾部，拼接出来只有一屏内容。
+    val scrollCaptureInProgress = LocalScrollCaptureInProgress.current
     val isUserDragging by scrollState.interactionSource.collectIsDraggedAsState()
     val isAtBottom by remember(scrollState) {
         derivedStateOf { !scrollState.canScrollForward }
@@ -597,8 +601,8 @@ internal fun AgentConversationMessages(
         messageCount = visibleMessages.size,
         hasEarlier = hasEarlierMessages,
         loadState = historyLoadState,
-        enabled = !isStreaming && editTargetMessageId == null,
-        canReleasePages = !isTailRendering && !isBottomSettling,
+        enabled = !scrollCaptureInProgress && !isStreaming && editTargetMessageId == null,
+        canReleasePages = !scrollCaptureInProgress && !isTailRendering && !isBottomSettling,
         keepBottomAnchored = keepBottomAnchored,
         onBottomAnchorChanged = onBottomAnchorChanged,
         onLoadEarlier = onLoadEarlierMessages,
@@ -606,7 +610,7 @@ internal fun AgentConversationMessages(
     )
 
     val shouldFollowBottom by rememberUpdatedState(
-        resolveBottomFollowEnabled(
+        !scrollCaptureInProgress && resolveBottomFollowEnabled(
             isStreaming = isStreaming,
             keepBottomAnchored = keepBottomAnchored,
             isUserDragging = isUserDragging,
@@ -624,7 +628,7 @@ internal fun AgentConversationMessages(
         isUserDragging,
         isStreaming,
     ) {
-        if (shouldRequestInitialBottom(
+        if (!scrollCaptureInProgress && shouldRequestInitialBottom(
                 isStreaming = isStreaming,
                 keepBottomAnchored = keepBottomAnchored,
                 isUserDragging = isUserDragging,

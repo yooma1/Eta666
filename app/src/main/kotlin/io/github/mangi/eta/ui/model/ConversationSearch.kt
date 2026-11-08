@@ -1,5 +1,6 @@
 package io.github.mangi.eta.ui.model
 
+import androidx.compose.runtime.Immutable
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 
 /**
@@ -17,31 +18,56 @@ internal fun AgentChatHomeUiState.contentMatches(
 private fun AgentChatMessageUi.matches(
     query: String,
     noticeText: (SystemNoticeCode) -> String,
-): Boolean = when (this) {
+): Boolean = searchableTexts(noticeText).any { text -> text.contains(query, ignoreCase = true) }
+
+/**
+ * 一条消息里所有可搜索的文本片段。会话内搜索与会话导航共用同一套口径，
+ * 避免「搜得到」和「目录里列不出来」对不上。
+ */
+internal fun AgentChatMessageUi.searchableTexts(
+    noticeText: (SystemNoticeCode) -> String,
+): List<String> = when (this) {
     is UserMessageUi -> {
         val prompt = AgentFileReferencePromptCodec.parse(content)
-        prompt.request.contains(query, ignoreCase = true) ||
-            prompt.references.any { reference ->
-                reference.displayName.contains(query, ignoreCase = true) ||
-                    reference.absolutePath.contains(query, ignoreCase = true)
-            }
+        listOf(prompt.request) + prompt.references.flatMap { reference ->
+            listOf(reference.displayName, reference.absolutePath)
+        }
     }
 
-    is AgentMessageUi -> content.contains(query, ignoreCase = true)
+    is AgentMessageUi -> listOf(content)
 
-    is ThinkingMessageUi -> content.contains(query, ignoreCase = true)
+    is ThinkingMessageUi -> listOf(content)
 
-    is ToolActivityMessageUi ->
-        toolName.contains(query, ignoreCase = true) ||
-            command?.contains(query, ignoreCase = true) == true ||
-            argumentsSummary.contains(query, ignoreCase = true) ||
-            resultSummary?.contains(query, ignoreCase = true) == true
+    is ToolActivityMessageUi -> listOfNotNull(
+        toolName,
+        command,
+        argumentsSummary,
+        resultSummary,
+    )
 
-    is ToolSummaryMessageUi -> tools.any { it.contains(query, ignoreCase = true) }
+    is ToolSummaryMessageUi -> tools
 
-    is SystemNoticeMessageUi ->
-        noticeText(code).contains(query, ignoreCase = true) ||
-            detail?.contains(query, ignoreCase = true) == true
+    is SystemNoticeMessageUi -> listOfNotNull(noticeText(code), detail)
 
-    else -> false
+    else -> emptyList()
+}
+
+/** 会话搜索命中定位：打开会话后滚动到命中消息并临时高亮；消费后由调用方置空。 */
+@Immutable
+internal data class SearchJumpUiState(
+    val messageId: String,
+    /** 递增令牌：同一条消息被反复命中时也要能再次触发跳转。 */
+    val token: Long,
+)
+
+/**
+ * 第一条命中消息的 id。仅标题或预览命中、消息内容未命中时返回 null，
+ * 此时调用方只打开会话、不做跳转。
+ */
+internal fun AgentChatHomeUiState.firstMatchMessageId(
+    query: String,
+    noticeText: (SystemNoticeCode) -> String,
+): String? {
+    if (query.isBlank()) return null
+    return messages.firstOrNull { message -> message.matches(query, noticeText) }?.id
 }
