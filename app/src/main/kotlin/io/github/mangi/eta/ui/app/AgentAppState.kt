@@ -48,6 +48,7 @@ import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.enabledModel
 import io.github.mangi.eta.data.repository.ConversationCategoryRepository
+import io.github.mangi.eta.data.repository.EtaBackupOptions
 import io.github.mangi.eta.data.repository.EtaBackupRepository
 import io.github.mangi.eta.data.repository.EtaBackupSummary
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -248,10 +249,15 @@ internal class AgentAppState(
         }
     }
 
-    suspend fun exportBackup(output: OutputStream): EtaBackupSummary =
-        EtaBackupRepository.export(appContext, output)
+    suspend fun exportBackup(
+        output: OutputStream,
+        options: EtaBackupOptions = EtaBackupOptions(),
+    ): EtaBackupSummary = EtaBackupRepository.export(appContext, output, options)
 
-    suspend fun importBackup(input: InputStream): EtaBackupSummary {
+    suspend fun importBackup(
+        input: InputStream,
+        options: EtaBackupOptions = EtaBackupOptions(),
+    ): EtaBackupSummary {
         val locallyBusy = withContext(Dispatchers.Main.immediate) {
             runStore.hasActiveRuns || conversationsById.values.any { it.isStreaming }
         }
@@ -284,7 +290,7 @@ internal class AgentAppState(
             pendingPersistence?.join()
             return conversationLoadMutex.withLock {
                 try {
-                    val summary = EtaBackupRepository.import(appContext, input, onCommitted = { imported = true })
+                    val summary = EtaBackupRepository.import(appContext, input, options = options, onCommitted = { imported = true })
                     reloadConversationsAfterBackup()
                     reloaded = true
                     summary

@@ -2,11 +2,13 @@ package io.github.mangi.eta.data.repository
 
 import android.content.Context
 import androidx.room.withTransaction
+import io.github.mangi.eta.agent.subagent.SubagentProfileCatalog
 import io.github.mangi.eta.data.db.ConversationContextCheckpointEntity
 import io.github.mangi.eta.data.db.ConversationEntity
 import io.github.mangi.eta.data.db.ConversationMessageEntity
 import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.data.db.McpServerEntity
 import io.github.mangi.eta.data.db.ProviderEntity
 import io.github.mangi.eta.data.db.ProviderModelEntity
 import io.github.mangi.eta.data.db.ProviderWithModelsSeed
@@ -44,6 +46,8 @@ internal data class EtaBackupDocument(
     val conversationState: ConversationStateEntity? = null,
     val memoryMd: String = "",
     val roleplay: CharacterBackupData? = null,
+    val mcpServers: List<EtaBackupMcpServer>? = null,
+    val customSubagents: List<EtaBackupCustomSubagent>? = null,
 ) {
     companion object {
         const val FORMAT = "eta-backup"
@@ -58,6 +62,23 @@ internal data class EtaBackupProvider(
     val models: List<ProviderModelEntity> = emptyList(),
 )
 
+@Serializable
+internal data class EtaBackupMcpServer(
+    val server: McpServerEntity,
+    val bearerToken: String? = null,
+)
+
+@Serializable
+internal data class EtaBackupCustomSubagent(
+    val name: String,
+    val markdown: String,
+)
+
+internal data class EtaBackupOptions(
+    val includeMcpServers: Boolean = true,
+    val includeCustomSubagents: Boolean = true,
+)
+
 internal data class EtaBackupSummary(
     val providerCount: Int,
     val modelCount: Int,
@@ -65,6 +86,8 @@ internal data class EtaBackupSummary(
     val messageCount: Int,
     val memoryBytes: Int,
     val characterCount: Int = 0,
+    val mcpServerCount: Int = 0,
+    val customSubagentCount: Int = 0,
 )
 
 internal class EtaBackupException(message: String, cause: Throwable? = null) :
@@ -73,7 +96,11 @@ internal class EtaBackupException(message: String, cause: Throwable? = null) :
 internal object EtaBackupRepository {
     private const val EXPORT_PAGE_SIZE = 64
 
-    suspend fun export(context: Context, output: OutputStream): EtaBackupSummary = withContext(Dispatchers.IO) {
+    suspend fun export(
+        context: Context,
+        output: OutputStream,
+        options: EtaBackupOptions = EtaBackupOptions(),
+    ): EtaBackupSummary = withContext(Dispatchers.IO) {
         var phase = "prepare_export"
         try {
             val appContext = context.applicationContext
@@ -81,12 +108,26 @@ internal object EtaBackupRepository {
             val database = EtaDatabase.get(appContext)
             val settings = SettingsDataStore.settings()
             val catalogRevision = SettingsDataStore.officialModelCatalogRevision()
+            val mcpSecretStore = McpSecretStore(appContext)
+            val customSubagents = if (options.includeCustomSubagents) {
+                SubagentProfileCatalog.exportCustomMarkdownFiles().map { (name, md) ->
+                    EtaBackupCustomSubagent(name = name, markdown = md)
+                }
+            } else null
             EtaBackupJsonStreams.export(appContext, output, onPhase = { phase = it }) { writer ->
                 database.withTransaction {
                     val dao = database.conversationDao()
                     val providers = database.providerDao().providers().map {
                         EtaBackupProvider(it.provider.withoutOAuthSecrets(), it.models)
                     }
+                    val mcpServers = if (options.includeMcpServers) {
+                        database.mcpServerDao().servers().map { entity ->
+                            EtaBackupMcpServer(
+                                server = entity,
+                                bearerToken = mcpSecretStore.bearerToken(entity.id),
+                            )
+                        }
+                    } else null
                     val memory = AgentMemoryRepository.snapshot().content
                     writer.value("format", String.serializer(), EtaBackupDocument.FORMAT)
                     writer.value("schemaVersion", Int.serializer(), EtaBackupDocument.SCHEMA_VERSION)
@@ -97,6 +138,16 @@ internal object EtaBackupRepository {
                     writer.value("selectedModelId", String.serializer().nullable, settings.selectedModelId)
                     writer.value("conversationState", ConversationStateEntity.serializer().nullable, dao.state())
                     writer.value("memoryMd", String.serializer(), memory)
+                    if (mcpServers != null) {
+                        writer.value("mcpServers", ListSerializer(EtaBackupMcpServer.serializer()).nullable, mcpServers)
+                    }
+                    if (customSubagents != null) {
+                        writer.value(
+                            "customSubagents",
+                            ListSerializer(EtaBackupCustomSubagent.serializer()).nullable,
+                            customSubagents,
+                        )
+                    }
                     val boundAvatars = linkedMapOf<String, String?>()
                     var conversationCount = 0
                     var messageCount = 0
@@ -127,8 +178,16 @@ internal object EtaBackupRepository {
                     phase = "export_roleplay"
                     val roleplay = CharacterBackupTransfer.snapshot(appContext, boundAvatars)
                     writer.value("roleplay", CharacterBackupData.serializer().nullable, roleplay)
-                    EtaBackupSummary(providers.size, providers.sumOf { it.models.size }, conversationCount,
-                        messageCount, memory.toByteArray(Charsets.UTF_8).size, roleplay.characters.size)
+                    EtaBackupSummary(
+                        providerCount = providers.size,
+                        modelCount = providers.sumOf { it.models.size },
+                        conversationCount = conversationCount,
+                        messageCount = messageCount,
+                        memoryBytes = memory.toByteArray(Charsets.UTF_8).size,
+                        characterCount = roleplay.characters.size,
+                        mcpServerCount = mcpServers?.size ?: 0,
+                        customSubagentCount = customSubagents?.size ?: 0,
+                    )
                 }
             }
         } catch (failure: Throwable) {
@@ -140,6 +199,7 @@ internal object EtaBackupRepository {
     suspend fun import(
         context: Context,
         input: InputStream,
+        options: EtaBackupOptions = EtaBackupOptions(),
         onCommitted: () -> Unit = {},
         forgetCredentials: (String) -> Unit = ProviderCredentialRepository::forget,
     ): EtaBackupSummary = withContext(Dispatchers.IO) {
@@ -155,15 +215,21 @@ internal object EtaBackupRepository {
                 val previousRoleMemories = document.roleplay?.assets.orEmpty().associate {
                     it.characterId to CharacterMemoryRepository.snapshot(appContext, it.characterId).content
                 }
+                val previousSubagents = if (options.includeCustomSubagents && document.customSubagents != null) {
+                    SubagentProfileCatalog.exportCustomMarkdownFiles()
+                } else null
                 phase = "restore_assets"
                 val avatarPaths = document.roleplay?.let { CharacterBackupTransfer.restoreAssets(appContext, it) }.orEmpty()
                 val cancellation = currentCoroutineContext()
                 val oauthProviders = document.providers.map { it.provider }
                     .filter { ProviderAuthModes.isOAuth(it.authMode) }
                 val credentialIds = document.providers.mapTo(linkedSetOf()) { it.provider.id }
+                val mcpSecretStore = McpSecretStore(appContext)
+                var previousMcpServers: List<McpServerEntity> = emptyList()
                 // 显式检查原任务取消，使 Room 提交到凭据清理之间不留下被取消打断的空隙。
                 withContext(NonCancellable) {
                     var memoryWriteStarted = false
+                    var subagentWriteStarted = false
                     try {
                         database.withTransaction {
                             cancellation.ensureActive()
@@ -172,6 +238,11 @@ internal object EtaBackupRepository {
                             database.providerDao().replaceAll(document.providers.map {
                                 ProviderWithModelsSeed(it.provider.awaitingCredentialCleanup(), it.models)
                             })
+                            if (options.includeMcpServers && document.mcpServers != null) {
+                                phase = "restore_mcp_servers"
+                                previousMcpServers = database.mcpServerDao().servers()
+                                database.mcpServerDao().replaceAll(document.mcpServers.map { it.server })
+                            }
                             val dao = database.conversationDao()
                             phase = "clear_conversations"
                             dao.deleteMessages()
@@ -205,6 +276,13 @@ internal object EtaBackupRepository {
                             memoryWriteStarted = true
                             AgentMemoryRepository.replaceAll(document.memoryMd)
                             document.roleplay?.let { CharacterBackupTransfer.restoreMemories(appContext, it) }
+                            if (options.includeCustomSubagents && document.customSubagents != null) {
+                                phase = "restore_custom_subagents"
+                                subagentWriteStarted = true
+                                SubagentProfileCatalog.replaceCustomMarkdownFiles(
+                                    document.customSubagents.associate { it.name to it.markdown },
+                                )
+                            }
                             cancellation.ensureActive()
                         }
                     } catch (failure: Throwable) {
@@ -218,10 +296,31 @@ internal object EtaBackupRepository {
                                 }
                             }
                         }
+                        if (subagentWriteStarted && previousSubagents != null) {
+                            try { SubagentProfileCatalog.replaceCustomMarkdownFiles(previousSubagents) } catch (restoreFailure: Throwable) {
+                                failure.addSuppressed(restoreFailure)
+                            }
+                        }
                         CharacterBackupTransfer.discardAssets(avatarPaths, failure)
                         throw failure
                     }
                     onCommitted()
+                    if (options.includeMcpServers && document.mcpServers != null) {
+                        runCatching {
+                            val newIds = document.mcpServers.mapTo(mutableSetOf()) { it.server.id }
+                            previousMcpServers.forEach { old ->
+                                if (old.id !in newIds) mcpSecretStore.clear(old.id)
+                            }
+                            document.mcpServers.forEach { item ->
+                                val token = item.bearerToken?.trim().orEmpty()
+                                if (token.isNotEmpty()) {
+                                    mcpSecretStore.setBearerToken(item.server.id, token)
+                                } else {
+                                    mcpSecretStore.clear(item.server.id)
+                                }
+                            }
+                        }
+                    }
                     try {
                         phase = "clear_provider_credentials"
                         credentialIds.forEach(forgetCredentials)

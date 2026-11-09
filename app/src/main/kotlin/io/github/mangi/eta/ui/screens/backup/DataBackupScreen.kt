@@ -26,6 +26,7 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.core.safeStackTrace
+import io.github.mangi.eta.data.repository.EtaBackupOptions
 import io.github.mangi.eta.data.repository.EtaBackupSummary
 import io.github.mangi.eta.ui.components.EtaArrowPreference
 import io.github.mangi.eta.ui.components.EtaCard
@@ -34,6 +35,7 @@ import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
 import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaPreferenceGroup
 import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
+import io.github.mangi.eta.ui.components.EtaSwitchPreference
 import io.github.mangi.eta.ui.components.EtaWindowDialog
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.MiuixScaffoldPage
@@ -52,13 +54,20 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 internal fun DataBackupScreen(
     context: Context,
     onBack: () -> Unit,
-    onExport: suspend (OutputStream) -> EtaBackupSummary,
-    onImport: suspend (InputStream) -> EtaBackupSummary,
+    onExport: suspend (OutputStream, EtaBackupOptions) -> EtaBackupSummary,
+    onImport: suspend (InputStream, EtaBackupOptions) -> EtaBackupSummary,
 ) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
+    var includeMcpServers by remember { mutableStateOf(true) }
+    var includeCustomSubagents by remember { mutableStateOf(true) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
+
+    fun currentOptions() = EtaBackupOptions(
+        includeMcpServers = includeMcpServers,
+        includeCustomSubagents = includeCustomSubagents,
+    )
 
     fun showFailure(throwable: Throwable) {
         if (throwable is CancellationException) throw throwable
@@ -74,19 +83,25 @@ internal fun DataBackupScreen(
         contract = ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        val options = currentOptions()
         scope.launch {
             busy = true
             try {
                 val output = context.contentResolver.openOutputStream(uri)
                     ?: error(context.getString(R.string.data_backup_file_open_failed))
-                val summary = output.use { onExport(it) }
+                val summary = output.use { onExport(it, options) }
+                val extra = buildList {
+                    if (options.includeMcpServers) add("MCP ${summary.mcpServerCount}")
+                    if (options.includeCustomSubagents) add("Subagent ${summary.customSubagentCount}")
+                }.joinToString(" · ")
+                val baseToast = context.getString(
+                    R.string.data_backup_exported,
+                    summary.conversationCount,
+                    summary.providerCount,
+                )
                 Toast.makeText(
                     context,
-                    context.getString(
-                        R.string.data_backup_exported,
-                        summary.conversationCount,
-                        summary.providerCount,
-                    ),
+                    if (extra.isEmpty()) baseToast else "$baseToast ($extra)",
                     Toast.LENGTH_SHORT,
                 ).show()
             } catch (throwable: Throwable) {
@@ -115,6 +130,28 @@ internal fun DataBackupScreen(
                 EtaPreference(
                     title = stringResource(R.string.data_backup_warning_title),
                     summary = stringResource(R.string.data_backup_warning_summary),
+                )
+            }
+        }
+        item(key = "options-title") {
+            EtaPreferenceGroupTitle("附加备份项（导出与导入生效）")
+        }
+        item(key = "options-card") {
+            EtaPreferenceGroup(modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp)) {
+                EtaSwitchPreference(
+                    title = "包含 MCP 服务器",
+                    summary = "备份与恢复已配置的 MCP 服务器、工具定义缓存及 Bearer 凭据",
+                    checked = includeMcpServers,
+                    enabled = !busy,
+                    onCheckedChange = { includeMcpServers = it },
+                )
+                EtaPreferenceDivider()
+                EtaSwitchPreference(
+                    title = "包含自定义 Subagents",
+                    summary = "备份与恢复工作区 agents/*.md 自定义子智能体模板",
+                    checked = includeCustomSubagents,
+                    enabled = !busy,
+                    onCheckedChange = { includeCustomSubagents = it },
                 )
             }
         }
@@ -187,20 +224,26 @@ internal fun DataBackupScreen(
                 },
                 onConfirm = {
                     val uri = pendingImportUri ?: return@MiuixDialogActions
+                    val options = currentOptions()
                     showImportDialog = false
                     scope.launch {
                         busy = true
                         try {
                             val input = context.contentResolver.openInputStream(uri)
                                 ?: error(context.getString(R.string.data_backup_file_open_failed))
-                            val summary = input.use { onImport(it) }
+                            val summary = input.use { onImport(it, options) }
+                            val extra = buildList {
+                                if (options.includeMcpServers && summary.mcpServerCount > 0) add("MCP ${summary.mcpServerCount}")
+                                if (options.includeCustomSubagents && summary.customSubagentCount > 0) add("Subagent ${summary.customSubagentCount}")
+                            }.joinToString(" · ")
+                            val baseToast = context.getString(
+                                R.string.data_backup_imported,
+                                summary.conversationCount,
+                                summary.providerCount,
+                            )
                             Toast.makeText(
                                 context,
-                                context.getString(
-                                    R.string.data_backup_imported,
-                                    summary.conversationCount,
-                                    summary.providerCount,
-                                ),
+                                if (extra.isEmpty()) baseToast else "$baseToast ($extra)",
                                 Toast.LENGTH_SHORT,
                             ).show()
                         } catch (throwable: Throwable) {

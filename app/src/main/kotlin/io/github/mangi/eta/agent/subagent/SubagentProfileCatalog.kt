@@ -144,6 +144,43 @@ internal object SubagentProfileCatalog {
         return targetFile.delete()
     }
 
+    fun exportCustomMarkdownFiles(agentsDir: File = defaultAgentsDir()): Map<String, String> =
+        discoverCustomProfilesWithLegacy(agentsDir).mapNotNull { profile ->
+            val path = profile.filePath ?: return@mapNotNull null
+            val content = runCatching { File(path).readText(Charsets.UTF_8) }.getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            profile.name to content
+        }.toMap(linkedMapOf())
+
+    fun replaceCustomMarkdownFiles(
+        filesByName: Map<String, String>,
+        agentsDir: File = defaultAgentsDir(),
+    ) {
+        if (!agentsDir.exists() && !agentsDir.mkdirs()) {
+            error("无法创建 agents 目录：${agentsDir.absolutePath}")
+        }
+        val canonicalRoot = agentsDir.canonicalFile.toPath()
+        agentsDir.listFiles().orEmpty().forEach { file ->
+            if (file.isFile && file.name.endsWith(".md") && !Files.isSymbolicLink(file.toPath())) {
+                file.delete()
+            }
+        }
+        filesByName.forEach { (rawName, content) ->
+            val normalizedName = rawName.trim().lowercase()
+            require(isValidName(normalizedName)) { "备份中的自定义 Subagent 名称无效：$rawName" }
+            val targetFile = File(agentsDir, "$normalizedName.md")
+            val canonicalTarget = targetFile.canonicalFile.toPath()
+            require(canonicalTarget.startsWith(canonicalRoot) && canonicalTarget != canonicalRoot) {
+                "非法的 Subagent 文件路径"
+            }
+            require(!Files.isSymbolicLink(targetFile.toPath())) {
+                "拒绝写入符号链接文件"
+            }
+            targetFile.writeText(content, Charsets.UTF_8)
+        }
+    }
+
     private fun discoverCustomProfiles(agentsDir: File): List<SubagentProfile> {
         if (!agentsDir.exists() || !agentsDir.isDirectory) return emptyList()
         if (Files.isSymbolicLink(agentsDir.toPath())) return emptyList()

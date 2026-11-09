@@ -1,5 +1,6 @@
 package io.github.mangi.eta.data.repository
 
+import io.github.mangi.eta.agent.subagent.SubagentProfileCatalog
 import io.github.mangi.eta.data.db.ConversationStateEntity
 import io.github.mangi.eta.data.model.ProviderAuthModes
 
@@ -51,6 +52,8 @@ internal object EtaBackupValidation {
                 messageCount = messageCount,
                 memoryBytes = header.memoryMd.toByteArray(Charsets.UTF_8).size,
                 characterCount = header.roleplay?.characters?.size ?: 0,
+                mcpServerCount = header.mcpServers?.size ?: 0,
+                customSubagentCount = header.customSubagents?.size ?: 0,
             )
         } catch (failure: IllegalArgumentException) {
             if (failure is EtaBackupException) throw failure
@@ -90,5 +93,20 @@ internal object EtaBackupValidation {
             throw EtaBackupException("备份中的会话状态无效")
         }
         if (document.memoryMd.toByteArray(Charsets.UTF_8).size > 1024 * 1024) throw EtaBackupException("MEMORY.md 超过 1 MiB 限制")
+        document.mcpServers?.let { servers ->
+            val ids = servers.map { it.server.id }
+            if (ids.size != ids.toSet().size || ids.any(String::isBlank)) {
+                throw EtaBackupException("备份中的 MCP 服务器存在重复或无效 ID")
+            }
+        }
+        document.customSubagents?.let { subagents ->
+            val names = subagents.map { it.name.trim().lowercase() }
+            if (names.size != names.toSet().size || names.any { !SubagentProfileCatalog.isValidName(it) }) {
+                throw EtaBackupException("备份中的自定义 Subagent 存在重复或无效名称")
+            }
+            if (subagents.any { it.markdown.isBlank() || it.markdown.toByteArray(Charsets.UTF_8).size > 64 * 1024 }) {
+                throw EtaBackupException("备份中的自定义 Subagent 内容无效或超过 64 KiB")
+            }
+        }
     }
 }
