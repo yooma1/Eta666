@@ -3,6 +3,8 @@ package io.github.mangi.eta.data.repository
 import android.content.Context
 import android.content.res.AssetManager
 import android.util.AtomicFile
+import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.datastore.SettingsDataStore
 import java.io.File
 import java.io.IOException
@@ -24,7 +26,14 @@ internal enum class AgentUserPromptMode(val persistedValue: String) {
     Global("global"),
 
     /** 仅逆向模式（所有已安装逆向技能均启用）的会话注入。 */
-    ReverseOnly("reverse");
+    ReverseOnly("reverse"),
+
+    /**
+     * 按当前会话模型自动选内置协议（[AgentUserPromptModelBinding]）。
+     *
+     * 映射不到时退回 `prompts/` 用户文件；两者都为空则不注入。
+     */
+    ModelBinding("model");
 
     companion object {
         fun fromPersistedValue(value: String?): AgentUserPromptMode =
@@ -125,9 +134,23 @@ internal class AgentUserPromptStore(
                 code = "PROMPT_BUILTIN_MISSING",
                 message = "应用内置的破甲记忆缺失，无法装配",
             )
+        installContentLocked(builtin.content)
+    }
+
+    /**
+     * 用一段已有正文装配生效文件：旧文件先备份，再原子写入。
+     *
+     * 与 [installBuiltin] 共用同一实现——内置破甲记忆与内置协议库的落盘语义必须一致，
+     * 否则「备份失败不覆盖」这类保证会在其中一条链路上悄悄失效。
+     */
+    fun installContent(content: String): AgentUserPromptSnapshot = synchronized(lock) {
+        installContentLocked(content)
+    }
+
+    private fun installContentLocked(content: String): AgentUserPromptSnapshot {
         clearActiveLocked()
-        writeLocked(builtin.content, DEFAULT_FILE_NAME)
-        snapshotLocked()
+        writeLocked(content, DEFAULT_FILE_NAME)
+        return snapshotLocked()
     }
 
     private fun clearActiveLocked(): AgentUserPromptSnapshot {
@@ -308,10 +331,15 @@ internal object AgentUserPromptRepository {
     @Volatile
     private lateinit var store: AgentUserPromptStore
 
+    /** 与 store 同源的 AssetManager：内置协议库走同一个 app.assets。 */
+    @Volatile
+    private lateinit var assets: AssetManager
+
     fun init(context: Context) {
         if (!::store.isInitialized) {
             val app = context.applicationContext
             store = AgentUserPromptStore(app.filesDir, app.assets)
+            assets = app.assets
         }
     }
 
@@ -340,6 +368,291 @@ internal object AgentUserPromptRepository {
     fun installBuiltin(): AgentUserPromptSnapshot {
         ensureInitialized()
         return store.installBuiltin()
+    }
+
+    /**
+     * 模板渲染（v6 唯一注入路径）：身份段按当前模型真实提供方填充，工程契约原样保留。
+     *
+     * 与 [loadForModel] 的分工：
+     * - [loadForModel]：45 选 1，切换 = 换整套身份与禁令，会打废请求前缀缓存
+     * - 本方法：一份骨架 + 变量，换模型只换身份段
+     *
+     * 渲染不完整（有占位符残留）时**不注入**并返回源标记——宁可回落到用户文件，
+     * 也不能把带 `{{MODEL_IDENTITY}}` 的正文发给模型。
+     */
+    fun loadTemplateFor(
+        enabled: Boolean,
+        model: String,
+        displayName: String = "",
+        knowledgeCutoff: String = "",
+    ): AgentUserPromptResolver.Resolution {
+        if (!enabled) {
+            return AgentUserPromptResolver.Resolution(
+                AgentUserPromptSnapshot.EMPTY,
+                AgentUserPromptResolver.Source.None,
+                reason = "注入总开关关闭",
+            )
+        }
+        ensureInitialized()
+        val template = runCatching {
+            assets.open(AgentUserPromptTemplate.ASSET_PATH).use { it.readBytes() }
+        }.getOrElse { throwable ->
+            AndroidAgentLogger.warnThrottled("prompt_template_unavailable") {
+                "Prompt template asset unavailable: type=${throwable.safeLogType()}"
+            }
+            return AgentUserPromptResolver.Resolution(
+                AgentUserPromptSnapshot.EMPTY,
+                AgentUserPromptResolver.Source.None,
+                reason = "模板 asset 缺失",
+            )
+        }
+        if (template.isEmpty()) {
+            return AgentUserPromptResolver.Resolution(
+                AgentUserPromptSnapshot.EMPTY,
+                AgentUserPromptResolver.Source.None,
+                reason = "模板 asset 为空",
+            )
+        }
+
+        val identity = AgentUserPromptModelBinding.identityOf(model, displayName)
+        val rendered = AgentUserPromptTemplate.render(
+            template = template.toString(Charsets.UTF_8),
+            fill = AgentUserPromptTemplate.Fill(
+                identity = identity.paragraph,
+                model = model.ifBlank { "未知" },
+                knowledgeCutoff = knowledgeCutoff,
+                notes = identity.notes,
+            ),
+        )
+        if (!rendered.complete) {
+            AndroidAgentLogger.warnThrottled("prompt_template_unresolved") {
+                "Prompt template has unresolved keys: ${rendered.unresolved.joinToString(",")}"
+            }
+            return AgentUserPromptResolver.Resolution(
+                AgentUserPromptSnapshot.EMPTY,
+                AgentUserPromptResolver.Source.None,
+                reason = "模板渲染不完整：${rendered.unresolved.joinToString(",")}",
+            )
+        }
+
+        val bytes = rendered.content.toByteArray(Charsets.UTF_8)
+        val raw = rendered.content
+        val truncated = raw.length > AgentUserPromptStore.MAX_CHARS
+        val content = if (truncated) {
+            raw.take(AgentUserPromptStore.MAX_CHARS) +
+                "\n[作战协议超过 ${AgentUserPromptStore.MAX_CHARS} 字符上限，已截断 ${raw.length - AgentUserPromptStore.MAX_CHARS} 字符]"
+        } else {
+            raw
+        }
+        return AgentUserPromptResolver.Resolution(
+            snapshot = AgentUserPromptSnapshot(
+                content = content,
+                revision = sha256Of(bytes),
+                byteSize = bytes.size,
+                charCount = raw.length,
+                fileName = "破甲记忆.md（模板渲染）",
+                truncated = truncated,
+            ),
+            source = AgentUserPromptResolver.Source.UserFile,
+            libraryEntryId = null,
+            reason = "模板渲染：${identity.headline}｜${identity.certainty.name}",
+        )
+    }
+
+    private fun sha256Of(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString(separator = "") { byte ->
+                (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+            }
+
+    /**
+     * 装配 v6 模板失败的原因，用于页面如实告知「为什么退回了内置版本」。
+     */
+    internal enum class TemplateInstallFailure(val label: String) {
+        ASSET_MISSING("模板 asset 缺失"),
+        ASSET_EMPTY("模板 asset 为空"),
+        UNRESOLVED("模板占位符未渲染完整"),
+        WRITE_FAILED("模板写入失败"),
+    }
+
+    /**
+     * 装配 v6 模板的结果。
+     *
+     * [fellBack] 为真时 [snapshot] 是**内置破甲记忆**而不是模板正文——调用方必须在 UI 上说清楚，
+     * 否则用户以为装的是 v6，实际跑的是旧版，这种静默替换比直接失败更难排查。
+     */
+    internal data class TemplateInstallResult(
+        val snapshot: AgentUserPromptSnapshot,
+        val fellBack: Boolean,
+        val failure: TemplateInstallFailure? = null,
+        val detail: String = "",
+    )
+
+    /**
+     * 装配 v6 模板；失败时自动退回内置破甲记忆（[installBuiltin]）。
+     *
+     * 兜底顺序刻意是「模板 → 内置」而不是反过来：模板是新的默认形态，
+     * 内置版本是保底可用，两者的落盘语义完全一致（先备份再原子写入）。
+     * 两种情况都会把旧文件备份到 prompts/.backup/，所以退回永远可逆。
+     */
+    fun installTemplateWithFallback(model: String, displayName: String = ""): TemplateInstallResult {
+        ensureInitialized()
+        val plan = runCatching { renderTemplateSnapshot(model, displayName) }
+        val snapshot = plan.getOrNull()
+        if (snapshot != null) {
+            return runCatching { store.installContent(snapshot.content) }
+                .fold(
+                    onSuccess = { installed ->
+                        TemplateInstallResult(installed, fellBack = false)
+                    },
+                    onFailure = { throwable ->
+                        AndroidAgentLogger.warnThrottled("prompt_template_install_failed") {
+                            "Template install failed, falling back: type=${throwable.safeLogType()}"
+                        }
+                        fallbackToBuiltin(TemplateInstallFailure.WRITE_FAILED, throwable.message.orEmpty())
+                    },
+                )
+        }
+        val failure = (plan.exceptionOrNull() as? TemplateRenderException)
+            ?: TemplateRenderException(TemplateInstallFailure.UNRESOLVED, plan.exceptionOrNull()?.message.orEmpty())
+        return fallbackToBuiltin(failure.failure, failure.message.orEmpty())
+    }
+
+    private fun fallbackToBuiltin(
+        failure: TemplateInstallFailure,
+        detail: String,
+    ): TemplateInstallResult {
+        AndroidAgentLogger.warn("Prompt template unavailable (${failure.label}), using builtin instead")
+        val builtin = runCatching { store.installBuiltin() }.getOrElse { throwable ->
+            throw AgentUserPromptException(
+                code = "PROMPT_TEMPLATE_AND_BUILTIN_FAILED",
+                message = "v6 模板装配失败（${failure.label}），内置版本也不可用：${throwable.message.orEmpty()}",
+                cause = throwable,
+            )
+        }
+        return TemplateInstallResult(builtin, fellBack = true, failure = failure, detail = detail)
+    }
+
+    private class TemplateRenderException(
+        val failure: TemplateInstallFailure,
+        message: String,
+    ) : IllegalStateException(message)
+
+    /** 渲染模板成可直接落盘的快照；任何一步不满足就抛 [TemplateRenderException]。 */
+    /**
+     * 运行期模板渲染缓存，按 `model|displayName` 分键。
+     *
+     * 为什么必须缓存：模板约 80k 字符，每轮 run 都重新读 asset + 做四次全串替换，
+     * 在低端机上会直接拖慢首 token。同一模型的渲染结果是纯函数输出，缓存安全；
+     * 换模型 = 换键 = 重新渲染一次，这正是「切模型自动换身份」要的行为。
+     *
+     * 上限保护：正常会话只会在少数几个模型间切换，超过 8 条说明调用方在拿随机串当模型名，
+     * 此时清空重建，避免把 80k × N 常驻在内存里。
+     */
+    private val templateCache =
+        java.util.concurrent.ConcurrentHashMap<String, AgentUserPromptSnapshot>()
+
+    internal fun renderForModel(model: String, displayName: String = ""): AgentUserPromptSnapshot? {
+        ensureInitialized()
+        val key = "${model.trim()}|${displayName.trim()}"
+        templateCache[key]?.let { return it }
+        val rendered = runCatching { renderTemplateSnapshot(model, displayName) }.getOrElse { throwable ->
+            AndroidAgentLogger.warnThrottled("prompt_template_render_failed") {
+                "Prompt template render failed for '$key': type=${throwable.safeLogType()}"
+            }
+            null
+        } ?: return null
+        if (templateCache.size >= 8) templateCache.clear()
+        templateCache[key] = rendered
+        return rendered
+    }
+
+    private fun renderTemplateSnapshot(model: String, displayName: String): AgentUserPromptSnapshot {
+        val bytes = runCatching {
+            assets.open(AgentUserPromptTemplate.ASSET_PATH).use { it.readBytes() }
+        }.getOrElse {
+            throw TemplateRenderException(TemplateInstallFailure.ASSET_MISSING, AgentUserPromptTemplate.ASSET_PATH)
+        }
+        if (bytes.isEmpty()) {
+            throw TemplateRenderException(TemplateInstallFailure.ASSET_EMPTY, "模板 asset 为 0 字节")
+        }
+        val identity = AgentUserPromptModelBinding.identityOf(model, displayName)
+        val rendered = AgentUserPromptTemplate.render(
+            template = bytes.toString(Charsets.UTF_8),
+            fill = AgentUserPromptTemplate.Fill(
+                identity = identity.paragraph,
+                model = model.ifBlank { "未知" },
+                knowledgeCutoff = "",
+                notes = identity.notes,
+            ),
+        )
+        if (!rendered.complete) {
+            throw TemplateRenderException(
+                TemplateInstallFailure.UNRESOLVED,
+                rendered.unresolved.joinToString(","),
+            )
+        }
+        val raw = rendered.content
+        if (raw.length > AgentUserPromptStore.MAX_CHARS) {
+            // 模板超限就不再截断装配：截断版会把 §4 工程契约砍掉一截，
+            // 装上去比用内置版本更糟，所以直接走兜底。
+            throw TemplateRenderException(
+                TemplateInstallFailure.WRITE_FAILED,
+                "模板 ${raw.length} 字符超出 ${AgentUserPromptStore.MAX_CHARS} 上限",
+            )
+        }
+        val out = raw.toByteArray(Charsets.UTF_8)
+        return AgentUserPromptSnapshot(
+            content = raw,
+            revision = sha256Of(out),
+            byteSize = out.size,
+            charCount = raw.length,
+            fileName = AgentUserPromptStore.DEFAULT_FILE_NAME,
+            truncated = false,
+        )
+    }
+
+    /**
+     * 内置协议库（随包 asset，移植自 github.com/yooma1/jailbreaks）。
+     *
+     * 语义与「装配内置版本」完全一致：先备份当前文件、再原子写入、失败不产生半成品；
+     * 区别只是正文来源不同。asset 缺失或索引损坏时返回空表，页面隐藏入口而不是崩。
+     */
+    fun libraryEntries(): List<AgentUserPromptLibraryEntry> {
+        ensureInitialized()
+        return AgentUserPromptLibrary.entries(assets)
+    }
+
+    /** 库里某一条的正文快照（供 UI 预览与 revision 比对）。 */
+    fun librarySnapshot(id: String): AgentUserPromptSnapshot? {
+        ensureInitialized()
+        val entry = AgentUserPromptLibrary.find(assets, id) ?: return null
+        val body = AgentUserPromptLibrary.read(assets, entry) ?: return null
+        return AgentUserPromptSnapshot(
+            content = body.content,
+            revision = body.revision,
+            byteSize = body.byteSize,
+            charCount = body.charCount,
+            fileName = null,
+            truncated = false,
+        )
+    }
+
+    /** 装配库里的一条：旧文件先进 .backup/，再写入新正文。 */
+    fun installFromLibrary(id: String): AgentUserPromptSnapshot {
+        ensureInitialized()
+        val entry = AgentUserPromptLibrary.find(assets, id)
+            ?: throw AgentUserPromptException(
+                code = "PROMPT_LIBRARY_MISSING",
+                message = "内置协议库里找不到 $id",
+            )
+        val body = AgentUserPromptLibrary.read(assets, entry)
+            ?: throw AgentUserPromptException(
+                code = "PROMPT_LIBRARY_READ_FAILED",
+                message = "无法读取内置协议 ${entry.title}",
+            )
+        return store.installContent(body.content)
     }
 
     /**
@@ -388,6 +701,79 @@ internal object AgentUserPromptRepository {
         } else {
             AgentUserPromptSnapshot.EMPTY
         }
+
+    /**
+     * 运行期装载（模型自适应）：按生效范围与当前模型在「用户文件 / 内置协议库」之间二选一。
+     *
+     * 顺序一旦定下就不再逐轮变化——同一个会话里换模型会让系统提示换一份，
+     * 请求前缀缓存整段失效，所以调用方必须在会话开始时冻结一次结果。
+     *
+     * 映射不到模型、库条目读失败、asset 缺失都只降级不抛错：协议是增强项，
+     * 不能因为它让整轮对话起不来。
+     */
+    fun loadForModel(
+        enabled: Boolean,
+        mode: AgentUserPromptMode,
+        model: String,
+        displayName: String = "",
+    ): AgentUserPromptResolver.Resolution {
+        if (!enabled) {
+            return AgentUserPromptResolver.Resolution(
+                AgentUserPromptSnapshot.EMPTY,
+                AgentUserPromptResolver.Source.None,
+                reason = "注入总开关关闭",
+            )
+        }
+        ensureInitialized()
+        val userPrompt = runCatching { snapshot() }.getOrDefault(AgentUserPromptSnapshot.EMPTY)
+        val match = AgentUserPromptModelBinding.resolveDetailed(model, displayName)
+        val boundId = match?.entryId
+        val bindingNote = match?.let { AgentUserPromptModelBinding.describe(it, model) }.orEmpty()
+        val entry = boundId?.let { id -> AgentUserPromptLibrary.find(assets, id) }
+
+        // 模板优先：v6 骨架 + 现场身份，取代「库里那整份带自己身份与禁令的协议」。
+        //
+        // 为什么不再注入库原文：45 份库条目各自写死一套身份（`You are Kimi K3.1…`），
+        // 切换模型等于换一整套人格与禁令，而且仓库那 45 份之间的条款互相矛盾。
+        // 模板只换 §0 身份段，工程契约固定不变，切换模型不再改变行为边界。
+        //
+        // 只对 ModelBinding / ReverseOnly 生效：这两个模式的语义就是「按模型选协议」。
+        // Global 模式下用户文件是原始意志，必须原样优先，不能被模板顶掉；
+        // Off 已在上面提前返回。
+        //
+        // 渲染失败（asset 缺失 / 占位符残留 / 超限）时回落到库原文，再回落到用户文件——
+        // 三层降级保证协议不会因为模板坏掉而整体消失。
+        val templateEligible =
+            mode == AgentUserPromptMode.ModelBinding || mode == AgentUserPromptMode.ReverseOnly
+        val templateRendered =
+            if (templateEligible && boundId != null) renderForModel(model, displayName) else null
+        if (templateRendered != null) {
+            return AgentUserPromptResolver.Resolution(
+                snapshot = templateRendered,
+                source = AgentUserPromptResolver.Source.UserFile,
+                libraryEntryId = boundId,
+                reason = "v6 模板现场渲染：$model → $boundId" +
+                    (if (bindingNote.isNotEmpty()) "（$bindingNote）" else ""),
+            )
+        }
+        val librarySnapshot = entry?.let { candidate ->
+            runCatching { librarySnapshot(candidate.id) }.getOrNull()
+        }
+        val resolution = AgentUserPromptResolver.resolve(
+            mode = mode,
+            model = model,
+            displayName = displayName,
+            userPrompt = userPrompt,
+            libraryEntry = entry,
+            librarySnapshot = librarySnapshot,
+        )
+        // 把「降了几级、命中哪一级」并进理由：页面与日志共用同一句，避免两处口径不一致。
+        return if (bindingNote.isNotEmpty() && resolution.source == AgentUserPromptResolver.Source.Library) {
+            resolution.copy(reason = resolution.reason + "（" + bindingNote + "）")
+        } else {
+            resolution
+        }
+    }
 
     private fun ensureInitialized() {
         check(::store.isInitialized) {

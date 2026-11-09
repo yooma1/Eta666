@@ -2,6 +2,8 @@ package io.github.mangi.eta.data.provider
 
 import io.github.mangi.eta.data.model.GeminiProviderSetting
 import io.github.mangi.eta.data.model.AnthropicProviderSetting
+import io.github.mangi.eta.data.model.Model
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.OpenAiCompatibleProviderSetting
 import io.github.mangi.eta.data.model.OpenAiEndpointMode
 import io.github.mangi.eta.data.model.ProviderSetting
@@ -25,8 +27,28 @@ internal object BuiltinProviders {
     const val XAI_ID = "builtin-xai"
     const val GEMINI_ID = "builtin-gemini"
     const val OPENCODE_ID = "builtin-opencode"
+    /** 借用厂商助手（小布）自身模型；不联网、不走 API Key。 */
+    const val BREENO_ID = "builtin-breeno"
 
     val PROVIDERS: List<ProviderSetting> = listOf(
+        OpenAiCompatibleProviderSetting(
+            id = BREENO_ID,
+            name = "小布助手（借用）",
+            baseUrl = "http://breeno.local/tap",
+            sourceType = ProviderSourceTypes.CUSTOM,
+            authMode = ProviderAuthModes.BREENO_TAP,
+            isBuiltIn = true,
+            sortOrder = 99,
+            systemPrompt = DEFAULT_SYSTEM_PROMPT,
+            models = listOf(
+                Model(
+                    id = "builtin-breeno-default",
+                    modelId = "breeno",
+                    displayName = "小布助手",
+                    isBuiltIn = true,
+                ),
+            ),
+        ),
         OpenAiCompatibleProviderSetting(
             id = OPENAI_ID,
             name = "OpenAI",

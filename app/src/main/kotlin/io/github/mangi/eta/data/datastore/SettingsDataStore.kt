@@ -142,6 +142,8 @@ internal object SettingsDataStore {
     private val IMAGE_GEN_BASE_URL = stringPreferencesKey("image_gen_base_url")
     private val IMAGE_GEN_API_KEY = stringPreferencesKey("image_gen_api_key")
     private val IMAGE_GEN_MODEL = stringPreferencesKey("image_gen_model")
+    private val IMAGE_GEN_QUALITY = stringPreferencesKey("image_gen_quality")
+    private val IMAGE_GEN_BACKGROUND = stringPreferencesKey("image_gen_background")
 
     private val REDTEAM_MODE = booleanPreferencesKey("redteam_mode")
     private val LINUX_DISTRIBUTION = stringPreferencesKey("linux_distribution")
@@ -512,6 +514,8 @@ internal object SettingsDataStore {
             baseUrl = prefs[IMAGE_GEN_BASE_URL] ?: "",
             apiKey = prefs[IMAGE_GEN_API_KEY] ?: "",
             model = prefs[IMAGE_GEN_MODEL] ?: "",
+            quality = prefs[IMAGE_GEN_QUALITY] ?: "auto",
+            background = prefs[IMAGE_GEN_BACKGROUND] ?: "auto",
         )
     }
 
@@ -522,6 +526,8 @@ internal object SettingsDataStore {
             prefs[IMAGE_GEN_BASE_URL] = settings.baseUrl
             prefs[IMAGE_GEN_API_KEY] = settings.apiKey
             prefs[IMAGE_GEN_MODEL] = settings.model
+            prefs[IMAGE_GEN_QUALITY] = settings.quality
+            prefs[IMAGE_GEN_BACKGROUND] = settings.background
         }
     }
 
@@ -530,6 +536,8 @@ internal object SettingsDataStore {
         val baseUrl: String = "",
         val apiKey: String = "",
         val model: String = "",
+        val quality: String = "auto",
+        val background: String = "auto",
     )
 
     suspend fun setLinuxDistribution(value: String?) {

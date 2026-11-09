@@ -16,6 +16,10 @@ internal object ImageGenModelRules {
     internal data class Adjustments(
         val n: Int,
         val size: String,
+        /** 修正后的画质参数；空串表示不带该参数（由服务端按默认处理）。 */
+        val quality: String,
+        /** 修正后的背景参数（opaque / transparent）；空串表示不带该参数。 */
+        val background: String,
         /** gpt-image 系列不接受 response_format，带了会 400。 */
         val omitResponseFormat: Boolean,
         /** 人话说明改了什么；非空时回传，让模型知道结果与预期不同。 */
@@ -28,6 +32,10 @@ internal object ImageGenModelRules {
     /** dall-e-2 只认方形三档。 */
     private val DALLE2_SIZES = setOf("256x256", "512x512", "1024x1024")
 
+    private val GPT_IMAGE_QUALITIES = setOf("auto", "low", "medium", "high")
+    private val DALLE3_QUALITIES = setOf("standard", "hd")
+    private val VALID_BACKGROUNDS = setOf("auto", "opaque", "transparent")
+
     /** 已知采用「异步任务 + 轮询」协议的模型族；仅用于给出可读的诊断。 */
     private val ASYNC_FAMILIES = listOf(
         "seedream", "seededit", "seedance",
@@ -35,14 +43,24 @@ internal object ImageGenModelRules {
         "hunyuan-image", "step-image", "cogview",
     )
 
-    fun adjust(model: String, size: String, requested: Int): Adjustments {
+    fun adjust(
+        model: String,
+        size: String,
+        requested: Int,
+        quality: String = "auto",
+        background: String = "auto",
+    ): Adjustments {
         val id = model.lowercase()
         val notes = mutableListOf<String>()
 
+        val isDalle3 = id.contains("dall-e-3") || id.contains("dalle-3")
+        val isDalle2 = id.contains("dall-e-2") || id.contains("dalle-2")
+        val isGptImage = id.contains("gpt-image")
+
         val (cap, capName) = when {
-            id.contains("dall-e-3") || id.contains("dalle-3") -> 1 to "dall-e-3"
-            id.contains("gpt-image") -> 10 to "gpt-image"
-            id.contains("dall-e-2") || id.contains("dalle-2") -> 10 to "dall-e-2"
+            isDalle3 -> 1 to "dall-e-3"
+            isGptImage -> 10 to "gpt-image"
+            isDalle2 -> 10 to "dall-e-2"
             else -> MAX_N to model
         }
         val n = requested.coerceIn(1, cap)
@@ -51,12 +69,12 @@ internal object ImageGenModelRules {
         }
 
         val normalizedSize = when {
-            id.contains("dall-e-3") || id.contains("dalle-3") ->
+            isDalle3 ->
                 if (size in DALLE3_SIZES) size else {
                     notes += "dall-e-3 只支持 1024x1024 / 1792x1024 / 1024x1792，已改用 ${nearestDalle3(size)}"
                     nearestDalle3(size)
                 }
-            id.contains("dall-e-2") || id.contains("dalle-2") ->
+            isDalle2 ->
                 if (size in DALLE2_SIZES) size else {
                     notes += "dall-e-2 只支持 256x256 / 512x512 / 1024x1024，已改用 1024x1024"
                     "1024x1024"
@@ -64,10 +82,50 @@ internal object ImageGenModelRules {
             else -> size
         }
 
-        // gpt-image-1/2 把 response_format 当成未知参数直接拒绝；它本来也只回 b64_json。
-        val omitResponseFormat = id.contains("gpt-image")
+        val q = quality.trim().lowercase()
+        val normalizedQuality = when {
+            q.isEmpty() || q == "auto" -> if (isGptImage) "auto" else ""
+            isGptImage -> when (q) {
+                in GPT_IMAGE_QUALITIES -> q
+                "hd" -> "high".also { notes += "gpt-image 将 quality=hd 映射为 high" }
+                "standard" -> "medium".also { notes += "gpt-image 将 quality=standard 映射为 medium" }
+                else -> "auto".also { notes += "gpt-image 不支持 quality=$q，已改用 auto" }
+            }
+            isDalle3 -> when (q) {
+                in DALLE3_QUALITIES -> q
+                "high" -> "hd".also { notes += "dall-e-3 将 quality=high 映射为 hd" }
+                "low", "medium" -> "standard".also { notes += "dall-e-3 将 quality=$q 映射为 standard" }
+                else -> ""
+            }
+            isDalle2 -> "".also {
+                notes += "dall-e-2 不支持 quality 参数，已忽略 quality=$q"
+            }
+            else -> q
+        }
 
-        return Adjustments(n = n, size = normalizedSize, omitResponseFormat = omitResponseFormat, notes = notes)
+        val bg = background.trim().lowercase()
+        val normalizedBackground = when {
+            bg.isEmpty() || bg == "auto" -> if (isGptImage) "auto" else ""
+            bg !in VALID_BACKGROUNDS -> "".also {
+                notes += "不支持的 background=$bg（仅支持 auto/opaque/transparent），已忽略"
+            }
+            isDalle3 || isDalle2 -> "".also {
+                notes += "${if (isDalle3) "dall-e-3" else "dall-e-2"} 不支持透明背景参数 background=$bg，已忽略"
+            }
+            else -> bg
+        }
+
+        // gpt-image-1/2 把 response_format 当成未知参数直接拒绝；它本来也只回 b64_json。
+        val omitResponseFormat = isGptImage
+
+        return Adjustments(
+            n = n,
+            size = normalizedSize,
+            quality = normalizedQuality,
+            background = normalizedBackground,
+            omitResponseFormat = omitResponseFormat,
+            notes = notes,
+        )
     }
 
     /** 响应里出现任务 id 而不是图片数据时，判断是不是这套模型族，好把原因说清楚。 */

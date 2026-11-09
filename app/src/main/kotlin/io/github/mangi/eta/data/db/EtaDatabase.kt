@@ -25,8 +25,10 @@ import androidx.room.migration.Migration
         McpServerEntity::class,
         CharacterEntity::class,
         UserPersonaEntity::class,
+        ConversationCategoryEntity::class,
+        ConversationCategoryMemberEntity::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -36,6 +38,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
     abstract fun skillDao(): SkillDao
     abstract fun mcpServerDao(): McpServerDao
     abstract fun characterDao(): CharacterDao
+    abstract fun conversationCategoryDao(): ConversationCategoryDao
 
     companion object {
         @Volatile
@@ -43,6 +46,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
 
         fun get(context: Context): EtaDatabase =
             instance ?: synchronized(this) {
+                repairHalfMigratedDatabase(context.applicationContext)
                 instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     EtaDatabase::class.java,
@@ -67,6 +71,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_21_22,
                         MIGRATION_22_23,
                         MIGRATION_23_24,
+                        MIGRATION_24_25,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
@@ -128,6 +133,67 @@ internal abstract class EtaDatabase : RoomDatabase() {
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_ms INTEGER")
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_tokens INTEGER")
         }
+
+        internal val MIGRATION_24_25 = Migration(24, 25) { database ->
+            createConversationCategorySchema(database)
+        }
+
+        internal fun createConversationCategorySchema(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            database.execSQL(CREATE_CATEGORIES)
+            database.execSQL(CREATE_CATEGORY_MEMBERS)
+            database.execSQL(CREATE_CATEGORY_MEMBERS_INDEX)
+        }
+
+        private fun repairHalfMigratedDatabase(context: Context) {
+            val file = context.getDatabasePath("eta.db")
+            if (!file.exists()) return
+            runCatching {
+                android.database.sqlite.SQLiteDatabase.openDatabase(
+                    file.absolutePath,
+                    null,
+                    android.database.sqlite.SQLiteDatabase.OPEN_READWRITE,
+                ).use { database ->
+                    val version = database.version
+                    if (version < DATABASE_VERSION_WITH_CATEGORIES) return@use
+                    val tables = mutableSetOf<String>()
+                    database.rawQuery(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN " +
+                            "('conversation_categories', 'conversation_category_members')",
+                        null,
+                    ).use { cursor ->
+                        while (cursor.moveToNext()) cursor.getString(0)?.let(tables::add)
+                    }
+                    if (tables.size < 2) {
+                        database.execSQL(CREATE_CATEGORIES)
+                        database.execSQL(CREATE_CATEGORY_MEMBERS)
+                        database.execSQL(CREATE_CATEGORY_MEMBERS_INDEX)
+                    }
+                    if (version < 25) database.version = 25
+                    database.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                    database.execSQL(
+                        "INSERT OR REPLACE INTO room_master_table (id,identity_hash) " +
+                            "VALUES(42, '$SCHEMA_25_IDENTITY_HASH')",
+                    )
+                }
+            }
+        }
+
+        private const val SCHEMA_25_IDENTITY_HASH = "6d9ae2c7a2f9fee84da7f0d6c89fab8d"
+        private const val DATABASE_VERSION_WITH_CATEGORIES = 24
+
+        private const val CREATE_CATEGORIES =
+            "CREATE TABLE IF NOT EXISTS `conversation_categories` (" +
+                "`id` TEXT NOT NULL, `name` TEXT NOT NULL, `sort_order` INTEGER NOT NULL, " +
+                "`created_at` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+
+        private const val CREATE_CATEGORY_MEMBERS =
+            "CREATE TABLE IF NOT EXISTS `conversation_category_members` (" +
+                "`conversation_id` TEXT NOT NULL, `category_id` TEXT NOT NULL, " +
+                "`updated_at` INTEGER NOT NULL, PRIMARY KEY(`conversation_id`))"
+
+        private const val CREATE_CATEGORY_MEMBERS_INDEX =
+            "CREATE INDEX IF NOT EXISTS `idx_conv_category_members_category` " +
+                "ON `conversation_category_members` (`category_id`)"
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {
             mapOf("runtime_results" to "run_id", "runtime_archive_runs" to "archive_run_id",

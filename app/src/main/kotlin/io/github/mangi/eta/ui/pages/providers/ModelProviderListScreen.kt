@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.ProviderSetting
+import io.github.mangi.eta.data.model.ProviderAuthModes
 import io.github.mangi.eta.data.model.ProviderSourceTypes
 import io.github.mangi.eta.data.model.typeLabel
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -67,10 +68,11 @@ internal fun ModelProviderListScreen(
     val filteredProviders = remember(providers, searchQuery) {
         val query = searchQuery.trim()
         providers.filter { provider ->
-            query.isBlank() ||
+            !ProviderAuthModes.isBorrowedVendor(provider.authMode) &&
+                (query.isBlank() ||
                 provider.name.contains(query, ignoreCase = true) ||
                 provider.baseUrl.contains(query, ignoreCase = true) ||
-                provider.typeLabel.contains(query, ignoreCase = true)
+                provider.typeLabel.contains(query, ignoreCase = true))
         }
     }
 

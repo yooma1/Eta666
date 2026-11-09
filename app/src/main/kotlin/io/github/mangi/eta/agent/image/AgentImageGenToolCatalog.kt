@@ -26,7 +26,7 @@ internal object AgentImageGenToolCatalog {
                 name = GENERATE_IMAGE,
                 description = "用已配置的生图中转站生成图片并保存到本机。返回保存路径；" +
                     "生成的图片会自动作为视觉输入进入本次结果，可以直接描述或继续加工。" +
-                    "提示词请写清主体、风格、构图；需要多张时调 n。" +
+                    "提示词请写清主体、风格、构图；需要多张时调 n；需要透明底（如图标、贴纸、抠图素材、Logo）时传 background=transparent。" +
                     "用户只要表达出画图意图（画/绘制/来一张/生成图片/插画/壁纸/封面/头像/海报/logo/" +
                     "示意图/配图/帮我配张图/改成某种风格）就应当直接调用本工具，不要先用文字问" +
                     "「要不要我画」或改成文字描述代答——本工具返回的图片会直接显示在对话里。",
@@ -47,6 +47,20 @@ internal object AgentImageGenToolCatalog {
                                 JSONObject()
                                     .put("type", "string")
                                     .put("description", "尺寸，如 1024x1024、1024x1536、1536x1024；留空由服务端决定"),
+                            )
+                            .put(
+                                "quality",
+                                JSONObject()
+                                    .put("type", "string")
+                                    .put("enum", JSONArray(ImageGenConfig.QUALITIES))
+                                    .put("description", "可选，画质档位：auto（默认，跟随设置）、low、medium、high（或 dall-e-3 的 standard/hd）"),
+                            )
+                            .put(
+                                "background",
+                                JSONObject()
+                                    .put("type", "string")
+                                    .put("enum", JSONArray(ImageGenConfig.BACKGROUNDS))
+                                    .put("description", "可选，背景模式：auto（默认，跟随设置）、opaque（不透明）、transparent（透明背景，适合图标/贴纸/Logo）"),
                             )
                             .put(
                                 "n",
@@ -73,9 +87,11 @@ internal object AgentImageGenToolCatalog {
             }
         val prompt = args.optString("prompt").trim().take(MAX_PROMPT)
         val size = args.optString("size").trim()
+        val quality = args.optString("quality").trim().ifBlank { config.quality }
+        val background = args.optString("background").trim().ifBlank { config.background }
         val count = args.optInt("n", 1).coerceIn(1, MAX_IMAGES)
 
-        return when (val outcome = ImageGenClient.generate(context, config, prompt, size, count)) {
+        return when (val outcome = ImageGenClient.generate(context, config, prompt, size, count, quality, background)) {
             is ImageGenOutcome.Failure -> fail(outcome.code, outcome.message)
             is ImageGenOutcome.Success -> {
                 val images = outcome.result.files.mapNotNull { file ->
@@ -100,6 +116,8 @@ internal object AgentImageGenToolCatalog {
                         .put("count", outcome.result.files.size)
                         .put("paths", paths)
                         .put("prompt", prompt)
+                        .put("quality", quality)
+                        .put("background", background)
                         // 参数被降级时明说，避免模型以为真的拿到了请求的张数/尺寸。
                         .put("adjustments", notes)
                         .toString(),

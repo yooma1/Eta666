@@ -52,6 +52,7 @@ import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.SettingsScreen
 import io.github.mangi.eta.ui.screens.subagent.SubagentSettingsScreen
 import io.github.mangi.eta.ui.components.MiuixDialogActions
+import io.github.mangi.eta.ui.components.ConversationMoveCategorySheet
 import io.github.mangi.eta.ui.model.AgentHomeAction
 import io.github.mangi.eta.ui.model.AgentMemoryAction
 import io.github.mangi.eta.ui.model.AgentSkillsAction
@@ -193,6 +194,7 @@ fun AgentAppRoot(
 
     var conversationPaneOpen by rememberSaveable { mutableStateOf(false) }
     var conversationRenameTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
+    var categoryMoveTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationDeleteTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var conversationExportTarget by remember { mutableStateOf<ConversationSummaryUi?>(null) }
     var messageDeleteTarget by remember { mutableStateOf<MessageMutationTarget?>(null) }
@@ -338,6 +340,9 @@ fun AgentAppRoot(
             onSelectConversation = { conversationId -> selectConversation(conversationId) },
             onConversationRename = { conversation ->
                 conversationRenameTarget = conversation
+            },
+            onConversationMoveCategory = { conversation ->
+                categoryMoveTarget = conversation
             },
             onConversationExport = { conversation ->
                 conversationExportTarget = conversation
@@ -818,6 +823,11 @@ fun AgentAppRoot(
                             AgentUserPromptAction.CancelImport -> userPrompt.cancelImport()
                             AgentUserPromptAction.OpenEditor -> userPrompt.openEditor()
                             AgentUserPromptAction.InstallBuiltin -> userPrompt.installBuiltin()
+                            AgentUserPromptAction.InstallTemplate -> userPrompt.installTemplate()
+                            is AgentUserPromptAction.LibraryQueryChanged ->
+                                userPrompt.setLibraryQuery(action.query)
+                            is AgentUserPromptAction.InstallLibraryEntry ->
+                                userPrompt.installLibraryEntry(action.id)
                             is AgentUserPromptAction.EnabledChanged -> userPrompt.setEnabled(action.enabled)
                         }
                     },
@@ -949,6 +959,37 @@ fun AgentAppRoot(
                 )
             }
         }
+    }
+
+    categoryMoveTarget?.let { conversation ->
+        ConversationMoveCategorySheet(
+            show = true,
+            categories = agentState.conversationPaneState.categories.map {
+                io.github.mangi.eta.data.repository.ConversationCategory(
+                    id = it.id,
+                    name = it.name,
+                    sortOrder = 0,
+                    conversationCount = it.conversationCount,
+                )
+            },
+            currentCategoryId = agentState.conversationPaneState.categoryAssignments[conversation.id],
+            onMove = { categoryId ->
+                agentState.moveConversationToCategory(conversation.id, categoryId)
+                categoryMoveTarget = null
+            },
+            onCreate = { name ->
+                agentState.createConversationCategory(name)
+                agentState.conversationPaneState.categories
+                    .firstOrNull { it.name == name.trim() }
+                    ?.let { agentState.moveConversationToCategory(conversation.id, it.id) }
+                categoryMoveTarget = null
+            },
+            onDelete = { categoryId ->
+                agentState.deleteConversationCategory(categoryId)
+                categoryMoveTarget = null
+            },
+            onDismiss = { categoryMoveTarget = null },
+        )
     }
 
     conversationDeleteTarget?.let { conversation ->

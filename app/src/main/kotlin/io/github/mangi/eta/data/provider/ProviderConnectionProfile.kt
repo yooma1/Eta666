@@ -48,6 +48,7 @@ internal enum class ProviderConnectionProfile(
     companion object {
         fun forAuthMode(authMode: String): ProviderConnectionProfile? = when (authMode) {
             ProviderAuthModes.API_KEY -> null
+            ProviderAuthModes.BREENO_TAP -> null
             ProviderAuthModes.OPENAI_CHATGPT -> OPENAI_CODEX
             ProviderAuthModes.XAI_GROK -> XAI_GROK
             // 未知认证方式按普通 API Key 连接处理：请求路径不应因为一个存量脏值整轮失败。

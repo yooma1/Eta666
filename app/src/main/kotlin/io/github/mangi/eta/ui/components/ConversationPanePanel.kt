@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.ImportContacts
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Schedule
@@ -60,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
+import io.github.mangi.eta.ui.model.ConversationCategoryUi
 import top.yukonga.miuix.kmp.basic.DropdownDefaults
 import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.DropdownItem
@@ -120,6 +122,7 @@ internal fun ConversationPanePanel(
     onSearchChange: (String) -> Unit,
     onConversationSelected: (String) -> Unit,
     onConversationRename: (ConversationSummaryUi) -> Unit,
+    onConversationMoveCategory: (ConversationSummaryUi) -> Unit,
     onConversationExport: (ConversationSummaryUi) -> Unit,
     onConversationDelete: (ConversationSummaryUi) -> Unit,
     onOpenSettings: () -> Unit,
@@ -132,7 +135,9 @@ internal fun ConversationPanePanel(
 ) {
     // state.conversations 已由 AgentAppState 按标题、预览与消息内容过滤。
     val query = state.searchQuery.trim()
-    val groups = remember(state.conversations) { state.conversations.groupForDrawer() }
+    val groups = remember(state.conversations, state.categories, state.categoryAssignments) {
+        state.conversations.groupForDrawerByCategory(state.categories, state.categoryAssignments)
+    }
 
     Surface(
         modifier = modifier
@@ -190,6 +195,7 @@ internal fun ConversationPanePanel(
                                 selected = conversation.id == state.selectedConversationId,
                                 onClick = { onConversationSelected(conversation.id) },
                                 onRename = { onConversationRename(conversation) },
+                                onMoveCategory = { onConversationMoveCategory(conversation) },
                                 onExport = { onConversationExport(conversation) },
                                 onDelete = { onConversationDelete(conversation) },
                             )
@@ -307,6 +313,7 @@ private fun ConversationTextRow(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onExport: () -> Unit,
+    onMoveCategory: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var showActionMenu by remember { mutableStateOf(false) }
@@ -396,6 +403,19 @@ private fun ConversationTextRow(
             val renameText = stringResource(R.string.action_rename)
             val exportText = stringResource(R.string.action_export)
             val deleteText = stringResource(R.string.action_delete)
+            val moveCategoryText = "移动到分类"
+            val moveCategoryItem = remember(moveCategoryText) {
+                DropdownItem(
+                    text = moveCategoryText,
+                    icon = { modifier ->
+                        Icon(
+                            imageVector = Icons.Rounded.Folder,
+                            contentDescription = null,
+                            modifier = modifier.size(ConversationPanelMetrics.ActionIconSize),
+                        )
+                    },
+                )
+            }
             val renameItem = remember(renameText) {
                 DropdownItem(
                     text = renameText,
@@ -440,8 +460,18 @@ private fun ConversationTextRow(
             )
             ListPopupColumn {
                 DropdownImpl(
+                    item = moveCategoryItem,
+                    optionSize = 4,
+                    isSelected = false,
+                    index = 0,
+                    onSelectedIndexChange = {
+                        showActionMenu = false
+                        onMoveCategory()
+                    },
+                )
+                DropdownImpl(
                     item = renameItem,
-                    optionSize = 3,
+                    optionSize = 4,
                     isSelected = false,
                     index = 0,
                     onSelectedIndexChange = {
@@ -451,7 +481,7 @@ private fun ConversationTextRow(
                 )
                 DropdownImpl(
                     item = exportItem,
-                    optionSize = 3,
+                    optionSize = 4,
                     isSelected = false,
                     index = 1,
                     onSelectedIndexChange = {
@@ -461,7 +491,7 @@ private fun ConversationTextRow(
                 )
                 DropdownImpl(
                     item = deleteItem,
-                    optionSize = 3,
+                    optionSize = 4,
                     isSelected = false,
                     index = 2,
                     dropdownColors = deleteColors,
@@ -575,6 +605,8 @@ private sealed interface ConversationDrawerSection {
     data object Pinned : ConversationDrawerSection
     data object Today : ConversationDrawerSection
     data class Dated(val label: String) : ConversationDrawerSection
+    data class Category(val id: String, val name: String) : ConversationDrawerSection
+    data object Uncategorized : ConversationDrawerSection
 }
 
 @Composable
@@ -582,6 +614,8 @@ private fun ConversationDrawerGroup.localizedLabel(): String = when (val value =
     ConversationDrawerSection.Pinned -> stringResource(R.string.conversation_section_pinned)
     ConversationDrawerSection.Today -> stringResource(R.string.conversation_section_today)
     is ConversationDrawerSection.Dated -> value.label
+    is ConversationDrawerSection.Category -> value.name
+    ConversationDrawerSection.Uncategorized -> "未分类"
 }
 
 private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawerGroup> {
@@ -595,6 +629,40 @@ private fun List<ConversationSummaryUi>.groupForDrawer(): List<ConversationDrawe
         } else {
             groups += ConversationDrawerGroup(section = section, items = listOf(conversation))
         }
+    }
+    return groups
+}
+
+/**
+ * 有分类时按分类分组（顺序跟用户在设置里排的一致，未分类垫底），
+ * 没有分类时保持原来的时间分组——不强迫只想按时间找会话的用户接受分类。
+ */
+private fun List<ConversationSummaryUi>.groupForDrawerByCategory(
+    categories: List<ConversationCategoryUi>,
+    assignments: Map<String, String>,
+): List<ConversationDrawerGroup> {
+    if (isEmpty()) return emptyList()
+    if (categories.isEmpty()) return groupForDrawer()
+    val buckets = linkedMapOf<String?, MutableList<ConversationSummaryUi>>()
+    categories.forEach { buckets[it.id] = mutableListOf() }
+    buckets[null] = mutableListOf()
+    for (conversation in this) {
+        val key = assignments[conversation.id]?.takeIf { it in buckets }
+        buckets.getValue(key).add(conversation)
+    }
+    val groups = mutableListOf<ConversationDrawerGroup>()
+    categories.forEach { category ->
+        val items = buckets[category.id].orEmpty()
+        if (items.isNotEmpty()) {
+            groups += ConversationDrawerGroup(
+                section = ConversationDrawerSection.Category(category.id, category.name),
+                items = items,
+            )
+        }
+    }
+    val uncategorized = buckets[null].orEmpty()
+    if (uncategorized.isNotEmpty()) {
+        groups += ConversationDrawerGroup(ConversationDrawerSection.Uncategorized, uncategorized)
     }
     return groups
 }

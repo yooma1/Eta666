@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,6 +28,7 @@ import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaPreferenceGroup
 import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
 import io.github.mangi.eta.ui.components.EtaSwitch
+import io.github.mangi.eta.ui.components.EtaSwitchPreference
 import io.github.mangi.eta.ui.components.EtaRadioButtonPreference
 import io.github.mangi.eta.ui.components.EtaTextButton
 import io.github.mangi.eta.ui.components.EtaWindowDialog
@@ -101,7 +103,39 @@ internal fun AgentUserPromptScreen(
                     title = "协议跟随逆向能力",
                     summary = injectSummary(state) + "；使用设置或技能页的逆向能力总开关",
                 )
+                if (state.libraryAvailable) {
+                    EtaPreferenceDivider()
+                    EtaPreference(
+                        title = "跟随当前模型",
+                        summary = bindingSummary(state),
+                    )
+                    EtaPreferenceDivider()
+                    EtaSwitchPreference(
+                        title = "启用模型绑定",
+                        summary = "开启后按当前会话模型自动选用内置协议；关闭则用 prompts/ 下你自己的文件",
+                        checked = state.mode == AgentUserPromptMode.ModelBinding,
+                        onCheckedChange = { enabled ->
+                            onAction(
+                                AgentUserPromptAction.ModeChanged(
+                                    if (enabled) {
+                                        AgentUserPromptMode.ModelBinding
+                                    } else {
+                                        AgentUserPromptMode.Global
+                                    },
+                                ),
+                            )
+                        },
+                    )
+                }
             }
+        }
+        item(key = "resolved") {
+            Text(
+                text = resolvedSummary(state),
+                style = MiuixTheme.textStyles.footnote1,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+            )
         }
 
         item(key = "editor-title") { EtaPreferenceGroupTitle("正文") }
@@ -143,6 +177,19 @@ internal fun AgentUserPromptScreen(
                     enabled = !state.isLoading && !state.isSaving,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(4.dp))
+                EtaTextButton(
+                    text = "装配 v6 模板（身份按当前模型填充）",
+                    onClick = { onAction(AgentUserPromptAction.InstallTemplate) },
+                    enabled = !state.isLoading && !state.isSaving,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "v6 模板失败时自动退回内置破甲记忆，并在提示里说明原因；两种情况都会先把当前文件备份到 prompts/.backup/。",
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp),
+                )
                 if (state.builtinAvailable) {
                     Spacer(Modifier.height(4.dp))
                     EtaTextButton(
@@ -150,6 +197,66 @@ internal fun AgentUserPromptScreen(
                         onClick = { onAction(AgentUserPromptAction.InstallBuiltin) },
                         enabled = !state.isLoading && !state.isSaving,
                         modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+
+        if (state.libraryAvailable) {
+            item(key = "library-title") { EtaPreferenceGroupTitle("内置协议库") }
+            item(key = "library-intro") {
+                Text(
+                    text = "随包的 ${state.libraryEntries.size} 份 system 协议（移植自 github.com/yooma1/jailbreaks，逐条转成纯正文）。" +
+                        "点装配会用该条覆盖当前生效文件，原文件先备份到 prompts/.backup/；装配不等于生效，是否注入仍看总开关。",
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                )
+            }
+            item(key = "library-search") {
+                TextField(
+                    value = state.libraryQuery,
+                    onValueChange = { onAction(AgentUserPromptAction.LibraryQueryChanged(it)) },
+                    label = "按标题 / id / 来源筛选",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+            items(state.filteredLibrary, key = { it.id }) { entry ->
+                EtaPreferenceGroup {
+                    EtaPreference(
+                        title = entry.title,
+                        summary = buildString {
+                            append(entry.id)
+                            append(" · ")
+                            append(formatNumber(entry.charCount))
+                            append(" 字符")
+                            if (entry.source.isNotBlank()) {
+                                append(" · ")
+                                append(entry.source.substringAfter("jailbreaks/", ""))
+                            }
+                        },
+                    )
+                    EtaPreferenceDivider()
+                    EtaTextButton(
+                        text = when {
+                            state.installingLibraryId == entry.id -> "装配中…"
+                            state.installingLibraryId != null -> "装配"
+                            else -> "装配这一条"
+                        },
+                        onClick = { onAction(AgentUserPromptAction.InstallLibraryEntry(entry.id)) },
+                        enabled = !state.isLoading && !state.isSaving && state.installingLibraryId == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            if (state.filteredLibrary.isEmpty()) {
+                item(key = "library-empty") {
+                    Text(
+                        text = "没有匹配「${state.libraryQuery}」的条目",
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
                     )
                 }
             }
@@ -292,6 +399,28 @@ private fun LargeContentPreview(
             modifier = Modifier.fillMaxWidth(),
         )
     }
+}
+
+/**
+ * 当前模型绑定到哪一条。
+ *
+ * 这一行是「跟随模型」唯一可核对的证据：没绑定就明说没绑定，
+ * 不要让用户以为切了开关就已经生效。
+ */
+private fun bindingSummary(state: AgentUserPromptUiState): String = when {
+    state.mode != AgentUserPromptMode.ModelBinding ->
+        "未开启 · 当前使用 prompts/ 下你自己的文件"
+    state.resolvedEntryId != null ->
+        "已绑定 ${state.resolvedEntryId} · ${formatNumber(state.resolvedChars ?: 0)} 字符"
+    else -> "当前模型在内置协议库里没有对应条目 · 回落用户文件"
+}
+
+/** 本轮实际注入哪一份（来源 + 理由 + 体积），照实说，不美化。 */
+private fun resolvedSummary(state: AgentUserPromptUiState): String {
+    val source = state.resolvedSource ?: return "本轮将注入哪一份：尚未解析（改开关注定在下一轮生效）"
+    val chars = state.resolvedChars?.let { " · ${formatNumber(it)} 字符" } ?: ""
+    val reason = state.resolvedReason?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+    return "本轮将注入：$source$chars$reason"
 }
 
 /** 内置版本状态：随包多少字符、是否就是当前生效文件——换版或手改过会显示「与当前不同」。 */

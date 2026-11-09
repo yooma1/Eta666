@@ -1,6 +1,7 @@
 package io.github.mangi.eta.ui.model
 
 import androidx.compose.runtime.Immutable
+import io.github.mangi.eta.data.repository.AgentUserPromptLibraryEntry
 import io.github.mangi.eta.data.repository.AgentUserPromptMode
 import io.github.mangi.eta.data.repository.AgentUserPromptStore
 
@@ -42,6 +43,16 @@ internal data class AgentUserPromptUiState(
     val pendingImport: PendingImport? = null,
     val builtinCharCount: Int? = null,
     val builtinRevision: String? = null,
+    /** 内置协议库条目（随包 asset，移植自 yooma1/jailbreaks）；空表时页面隐藏入口。 */
+    val libraryEntries: List<AgentUserPromptLibraryEntry> = emptyList(),
+    /** 正在装配的库条目 id（装配是同步 IO，UI 只用来禁用按钮）。 */
+    val installingLibraryId: String? = null,
+    val libraryQuery: String = "",
+    /** 当前模型实际会注入哪一份（来源标签 / 库条目 / 理由 / 字符数）。 */
+    val resolvedSource: String? = null,
+    val resolvedEntryId: String? = null,
+    val resolvedReason: String? = null,
+    val resolvedChars: Int? = null,
     val notice: String? = null,
 ) {
     val hasUnsavedChanges: Boolean get() = draft != savedContent
@@ -96,6 +107,21 @@ internal data class AgentUserPromptUiState(
      */
     val builtinInstalled: Boolean
         get() = builtinRevision != null && revision != null && builtinRevision == revision
+
+    /** 库入口是否可用（随包索引读得到）。 */
+    val libraryAvailable: Boolean get() = libraryEntries.isNotEmpty()
+
+    /** 按标题 / id / 来源过滤后的库列表；空查询返回全部。 */
+    val filteredLibrary: List<AgentUserPromptLibraryEntry>
+        get() {
+            val q = libraryQuery.trim().lowercase()
+            if (q.isEmpty()) return libraryEntries
+            return libraryEntries.filter {
+                it.id.lowercase().contains(q) ||
+                    it.title.lowercase().contains(q) ||
+                    it.source.lowercase().contains(q)
+            }
+        }
 
     companion object {
         /** 超过这个长度就不再默认渲染可编辑文本框。 */

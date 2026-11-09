@@ -222,6 +222,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/eta_file_paths" />
         </provider>
+        <!-- 借用厂商助手模型：接收小布进程内 hook 旁路回来的回答；调用方在 provider 内校验 -->
+        <provider
+            android:name=".agent.breeno.BreenoTapProvider"
+            android:authorities="${applicationId}.breeno-tap"
+            android:exported="true"
+            android:grantUriPermissions="false" />
     </application>
 
 </manifest>

@@ -68,11 +68,16 @@ internal object AgentModelPickerProjector {
         providers: List<ProviderSetting>,
         selectedProviderId: String?,
         selectedModelId: String?,
+        borrowVendorEnabled: Boolean = false,
     ): AgentModelPickerUiState {
         val enabledProviders = providers
             .asSequence()
             .filter(ProviderSetting::isEnabled)
-            .filter { it.authMode == ProviderAuthModes.API_KEY || ProviderAuthModes.isOAuth(it.authMode) }
+            .filter {
+                it.authMode == ProviderAuthModes.API_KEY ||
+                    ProviderAuthModes.isOAuth(it.authMode) ||
+                    (borrowVendorEnabled && ProviderAuthModes.isBorrowedVendor(it.authMode))
+            }
             .sortedBy(ProviderSetting::sortOrder)
             .toList()
         val selectedProvider = enabledProviders.firstOrNull { it.id == selectedProviderId }

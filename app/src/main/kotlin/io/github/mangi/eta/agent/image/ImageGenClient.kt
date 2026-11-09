@@ -53,6 +53,8 @@ internal object ImageGenClient {
         prompt: String,
         size: String,
         count: Int,
+        quality: String = config.quality,
+        background: String = config.background,
     ): ImageGenOutcome {
         if (!config.usable) {
             return ImageGenOutcome.Failure(
@@ -64,13 +66,21 @@ internal object ImageGenClient {
             return ImageGenOutcome.Failure("IMAGE_GEN_EMPTY_PROMPT", "prompt 不能为空")
         }
         // 先按模型名把参数掰到合法区间：dall-e-3 只认 n=1、gpt-image 不接受 response_format。
-        val rules = ImageGenModelRules.adjust(config.model, size.trim(), count)
+        val rules = ImageGenModelRules.adjust(
+            model = config.model,
+            size = size.trim(),
+            requested = count,
+            quality = quality,
+            background = background,
+        )
         val payload = JSONObject()
             .put("model", config.model)
             .put("prompt", prompt)
             .put("n", rules.n)
         if (!rules.omitResponseFormat) payload.put("response_format", "b64_json")
         rules.size.takeIf { it.isNotEmpty() }?.let { payload.put("size", it) }
+        rules.quality.takeIf { it.isNotEmpty() }?.let { payload.put("quality", it) }
+        rules.background.takeIf { it.isNotEmpty() }?.let { payload.put("background", it) }
 
         val notes = rules.notes.toMutableList()
 
@@ -111,6 +121,21 @@ internal object ImageGenClient {
                 payload.remove("size")
                 notes += "服务端不接受该 size，已省略让服务端决定"
                 result = post(payload)
+            }
+            if (!result.ok && result.status == 400 && (payload.has("quality") || payload.has("background"))) {
+                val dropBg = payload.has("background") && ("background" in text || "unknown" in text || "unrecognized" in text)
+                val dropQ = payload.has("quality") && ("quality" in text || "unknown" in text || "unrecognized" in text)
+                if (dropBg || dropQ) {
+                    if (dropBg) {
+                        payload.remove("background")
+                        notes += "服务端不接受 background 参数，已省略重试"
+                    }
+                    if (dropQ) {
+                        payload.remove("quality")
+                        notes += "服务端不接受 quality 参数，已省略重试"
+                    }
+                    result = post(payload)
+                }
             }
         }
 

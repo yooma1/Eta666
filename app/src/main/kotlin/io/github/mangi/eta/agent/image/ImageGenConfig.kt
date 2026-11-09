@@ -13,6 +13,8 @@ internal data class ImageGenConfig(
     val apiKey: String,
     val model: String,
     val enabled: Boolean,
+    val quality: String = "auto",
+    val background: String = "auto",
 ) {
     val usable: Boolean get() = enabled && baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
 
@@ -40,14 +42,24 @@ internal data class ImageGenConfig(
     companion object {
         const val DEFAULT_MODEL = "gpt-image-1"
         const val DEFAULT_BASE_URL = ""
+        val QUALITIES = listOf("auto", "low", "medium", "high", "standard", "hd")
+        val BACKGROUNDS = listOf("auto", "opaque", "transparent")
 
-        fun fromSettings(baseUrl: String, apiKey: String, model: String, enabled: Boolean) =
-            ImageGenConfig(
-                baseUrl = baseUrl.trim(),
-                apiKey = apiKey.trim(),
-                model = model.trim().ifBlank { DEFAULT_MODEL },
-                enabled = enabled,
-            )
+        fun fromSettings(
+            baseUrl: String,
+            apiKey: String,
+            model: String,
+            enabled: Boolean,
+            quality: String = "auto",
+            background: String = "auto",
+        ) = ImageGenConfig(
+            baseUrl = baseUrl.trim(),
+            apiKey = apiKey.trim(),
+            model = model.trim().ifBlank { DEFAULT_MODEL },
+            enabled = enabled,
+            quality = quality.trim().lowercase().takeIf { it in QUALITIES } ?: "auto",
+            background = background.trim().lowercase().takeIf { it in BACKGROUNDS } ?: "auto",
+        )
     }
 }
 

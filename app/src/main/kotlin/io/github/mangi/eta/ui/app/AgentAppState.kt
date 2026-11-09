@@ -47,6 +47,7 @@ import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ProviderSetting
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.model.enabledModel
+import io.github.mangi.eta.data.repository.ConversationCategoryRepository
 import io.github.mangi.eta.data.repository.EtaBackupRepository
 import io.github.mangi.eta.data.repository.EtaBackupSummary
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -56,6 +57,7 @@ import io.github.mangi.eta.ui.model.AgentChatMessageUi
 import io.github.mangi.eta.ui.model.AgentMessageUi
 import io.github.mangi.eta.ui.model.AgentModelPickerProjector
 import io.github.mangi.eta.ui.model.AgentModelPickerUiState
+import io.github.mangi.eta.ui.model.ConversationCategoryUi
 import io.github.mangi.eta.ui.model.ConversationModeUi
 import io.github.mangi.eta.ui.model.ConversationPaneUiState
 import io.github.mangi.eta.ui.model.ConversationSummaryUi
@@ -157,6 +159,7 @@ internal class AgentAppState(
 
     init {
         refreshConversationSummaries()
+        scope.launch(Dispatchers.IO) { refreshConversationCategories() }
         observeRuntimeSelection()
         runtimeRecoveryInProgress.set(true)
         scope.launch(Dispatchers.IO) {
@@ -197,10 +200,16 @@ internal class AgentAppState(
      */
     private fun refreshConversationModel() {
         val bound = providers.enabledModel(homeState.modelId)
+        val borrowVendorEnabled = Prefs.remotePreferencesForUi(EtaApp.serviceInstance)
+            ?.getBoolean(Prefs.Keys.AGENT_BORROW_BREENO, false) ?: false
         val pickerState = if (bound != null) {
-            AgentModelPickerProjector.project(providers, bound.provider.id, bound.model.id)
+            AgentModelPickerProjector.project(
+                providers, bound.provider.id, bound.model.id, borrowVendorEnabled,
+            )
         } else {
-            AgentModelPickerProjector.project(providers, defaultProviderId, defaultModelId)
+            AgentModelPickerProjector.project(
+                providers, defaultProviderId, defaultModelId, borrowVendorEnabled,
+            )
         }
         modelPickerState = pickerState.copy(isChanging = modelPickerState.isChanging)
         val effective = bound ?: providers.enabledModel(pickerState.selectedModel?.id)
@@ -617,6 +626,7 @@ internal class AgentAppState(
     }
 
     private suspend fun importArchivedExternalRuns() {
+        backfillExternalSourceCategories()
         val archivedRuns = withContext(Dispatchers.IO) {
             AgentRunArchiveStore.list(appContext)
                 .filter { AgentExternalArchivePayload.from(it.handoff.payload) != null }
@@ -680,6 +690,14 @@ internal class AgentAppState(
                     !it.isStreaming
             }
         if (alreadyImported) return runId
+
+        // 小布等外部入口进来的会话自动归到对应分类；用户已经手动归类过的不覆盖。
+        if (ConversationCategoryRepository.categoryIdOf(appContext, conversationId) == null) {
+            autoCategoryForSource(archivedRun.handoff.source)?.let { categoryId ->
+                ConversationCategoryRepository.assignConversation(appContext, conversationId, categoryId)
+                refreshConversationCategories()
+            }
+        }
 
         if (conversationTitles[conversationId].isNullOrBlank()) {
             conversationTitles = conversationTitles + (conversationId to payload.title)
@@ -2043,6 +2061,76 @@ internal class AgentAppState(
             AgentFileReferenceGateway.Error.ValidationTimedOut -> appContext.getString(R.string.state_ui_path_verification_timed_out_please_try_again_703687)
         }
 
+    /** 刷新侧栏分类与归属：建/删分类、移动会话后调用。 */
+    fun refreshConversationCategories() {
+        val categories = ConversationCategoryRepository.categories(appContext).map {
+            ConversationCategoryUi(id = it.id, name = it.name, conversationCount = it.conversationCount)
+        }
+        val assignments = ConversationCategoryRepository.assignments(appContext)
+        conversationPaneState = conversationPaneState.copy(
+            categories = categories,
+            categoryAssignments = assignments,
+        )
+    }
+
+    fun createConversationCategory(name: String): String? {
+        val created = ConversationCategoryRepository.createCategory(appContext, name) ?: return null
+        refreshConversationCategories()
+        conversationPaneState.selectedConversationId?.let { id ->
+            ConversationCategoryRepository.assignConversation(appContext, id, created.id)
+            refreshConversationCategories()
+        }
+        return created.id
+    }
+
+    /**
+     * 外部入口来源对应的自动归属分类：按名字找，找不到就新建一个。
+     * 来源不在白名单里时返回 null，会话保持未分类。
+     */
+    private fun autoCategoryForSource(source: String): String? {
+        val name = externalSourceCategoryNames[source] ?: return null
+        val existing = ConversationCategoryRepository.categories(appContext).firstOrNull { it.name == name }
+        if (existing != null) return existing.id
+        val created = ConversationCategoryRepository.createCategory(appContext, name) ?: return null
+        refreshConversationCategories()
+        return created.id
+    }
+
+    /**
+     * 存量补归属：升级前的归档会话 id 是来源哈希，反推不出来源，只能按标题形态认。
+     * 只执行一次，之后用户手动改分类不会在下次启动被打回。
+     */
+    private suspend fun backfillExternalSourceCategories() {
+        val prefs = appContext.getSharedPreferences(CATEGORY_BACKFILL_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(CATEGORY_BACKFILL_KEY, false)) return
+        withContext(Dispatchers.Main) {
+            val currentAssignments = ConversationCategoryRepository.assignments(appContext)
+            val legacyBreenoIds = conversationTitles
+                .filterValues { title -> title.isLegacyBreenoTitle() }
+                .keys
+                .filter { conversationId -> currentAssignments[conversationId] == null }
+            if (legacyBreenoIds.isNotEmpty()) {
+                autoCategoryForSource(BREENO_HANDOFF_SOURCE)?.let { categoryId ->
+                    legacyBreenoIds.forEach { conversationId ->
+                        ConversationCategoryRepository.assignConversation(appContext, conversationId, categoryId)
+                    }
+                    refreshConversationCategories()
+                }
+            }
+            prefs.edit().putBoolean(CATEGORY_BACKFILL_KEY, true).apply()
+        }
+    }
+
+    fun deleteConversationCategory(categoryId: String) {
+        ConversationCategoryRepository.deleteCategory(appContext, categoryId)
+        refreshConversationCategories()
+    }
+
+    fun moveConversationToCategory(conversationId: String, categoryId: String?) {
+        ConversationCategoryRepository.assignConversation(appContext, conversationId, categoryId)
+        refreshConversationCategories()
+    }
+
     fun stopCurrentRun() {
         val runId = runStore.activeRunId(selectedConversationId) ?: return
         stopRun(runId)
@@ -2545,3 +2633,20 @@ private fun String.isReadOnlyExternalArchiveConversation(): Boolean =
 private fun agentBooleanForUi(key: String): Boolean {
     return Prefs.isEnabled(key)
 }
+
+/** 小布（Breeno）交付来源标识，与 hook 侧的 handoff.source 保持一致。 */
+private const val BREENO_HANDOFF_SOURCE = "breeno"
+
+/** 外部入口来源 → 自动归属的会话分类名；不在此表里的来源保持未分类。 */
+private val externalSourceCategoryNames: Map<String, String> = mapOf(
+    BREENO_HANDOFF_SOURCE to "小布",
+)
+
+/** 存档中的小布会话标题形态（BreenoHooks.archiveTitle 生成），仅用于给升级前的存量会话补归属。 */
+private fun String.isLegacyBreenoTitle(): Boolean {
+    val trimmed = trim()
+    return trimmed.startsWith("小布：") || trimmed == "小布对话"
+}
+
+private const val CATEGORY_BACKFILL_PREFS = "eta_conversation_category_backfill"
+private const val CATEGORY_BACKFILL_KEY = "external_source_categories_backfilled_v1"

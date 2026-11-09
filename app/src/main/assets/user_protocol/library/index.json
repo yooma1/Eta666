@@ -1,0 +1,367 @@
+{
+  "version": 1,
+  "repo": "https://github.com/yooma1/jailbreaks",
+  "count": 45,
+  "entries": [
+    {
+      "id": "0x8d-jailbreaks__bigpickle-opencode",
+      "title": "BigPickle-opencode",
+      "file": "user_protocol/library/0x8d-jailbreaks__bigpickle-opencode.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/BigPickle-opencode.md",
+      "chars": 25462,
+      "bytes": 25757
+    },
+    {
+      "id": "0x8d-jailbreaks__chatgpt-free-tier",
+      "title": "REGISTER",
+      "file": "user_protocol/library/0x8d-jailbreaks__chatgpt-free-tier.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/chatgpt-free-tier.md",
+      "chars": 16693,
+      "bytes": 16832
+    },
+    {
+      "id": "0x8d-jailbreaks__gemini-chat",
+      "title": "REGISTER",
+      "file": "user_protocol/library/0x8d-jailbreaks__gemini-chat.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/gemini-chat.md",
+      "chars": 16693,
+      "bytes": 16832
+    },
+    {
+      "id": "0x8d-jailbreaks__gpt-new",
+      "title": "gpt-new",
+      "file": "user_protocol/library/0x8d-jailbreaks__gpt-new.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/gpt-new.md",
+      "chars": 6080,
+      "bytes": 6321
+    },
+    {
+      "id": "0x8d-jailbreaks__grok-fast",
+      "title": "REGISTER",
+      "file": "user_protocol/library/0x8d-jailbreaks__grok-fast.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/grok-fast.md",
+      "chars": 16693,
+      "bytes": 16832
+    },
+    {
+      "id": "0x8d-jailbreaks__grok-fast-v2",
+      "title": "grok-fast-v2",
+      "file": "user_protocol/library/0x8d-jailbreaks__grok-fast-v2.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/grok-fast-v2.md",
+      "chars": 11620,
+      "bytes": 12024
+    },
+    {
+      "id": "0x8d-jailbreaks__kimi-standard",
+      "title": "REGISTER",
+      "file": "user_protocol/library/0x8d-jailbreaks__kimi-standard.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/kimi-standard.md",
+      "chars": 16693,
+      "bytes": 16832
+    },
+    {
+      "id": "0x8d-jailbreaks__mistral-small-4-duck.ai",
+      "title": "mistral-small-4 (duck.ai)",
+      "file": "user_protocol/library/0x8d-jailbreaks__mistral-small-4-duck.ai.txt",
+      "source": "github.com/yooma1/jailbreaks/0x8D jailbreaks/mistral-small-4 (duck.ai).md",
+      "chars": 3354,
+      "bytes": 3372
+    },
+    {
+      "id": "beam",
+      "title": "Beam",
+      "file": "user_protocol/library/beam.txt",
+      "source": "github.com/yooma1/jailbreaks/Beam.md",
+      "chars": 11365,
+      "bytes": 11453
+    },
+    {
+      "id": "deepseek-4-1",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/deepseek-4-1.txt",
+      "source": "github.com/yooma1/jailbreaks/deepseek-4-1.md",
+      "chars": 20490,
+      "bytes": 20528
+    },
+    {
+      "id": "deepseek-v3",
+      "title": "deepseek v3",
+      "file": "user_protocol/library/deepseek-v3.txt",
+      "source": "github.com/yooma1/jailbreaks/deepseek v3.md",
+      "chars": 12591,
+      "bytes": 12683
+    },
+    {
+      "id": "deepseek-v4",
+      "title": "deepseek v4",
+      "file": "user_protocol/library/deepseek-v4.txt",
+      "source": "github.com/yooma1/jailbreaks/deepseek v4.md",
+      "chars": 13026,
+      "bytes": 13120
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "title": "gemini-3.1-pro",
+      "file": "user_protocol/library/gemini-3.1-pro.txt",
+      "source": "github.com/yooma1/jailbreaks/gemini-3.1-pro.md",
+      "chars": 20711,
+      "bytes": 20962
+    },
+    {
+      "id": "gemini-4-argon",
+      "title": "Operating Policy",
+      "file": "user_protocol/library/gemini-4-argon.txt",
+      "source": "github.com/yooma1/jailbreaks/Gemini-4-Argon.md",
+      "chars": 13936,
+      "bytes": 13998
+    },
+    {
+      "id": "gemma4",
+      "title": "gemma4",
+      "file": "user_protocol/library/gemma4.txt",
+      "source": "github.com/yooma1/jailbreaks/gemma4.md",
+      "chars": 12780,
+      "bytes": 12848
+    },
+    {
+      "id": "glm-5-3-flash",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/glm-5-3-flash.txt",
+      "source": "github.com/yooma1/jailbreaks/glm-5-3-flash.md",
+      "chars": 26242,
+      "bytes": 26328
+    },
+    {
+      "id": "glm-5.2",
+      "title": "glm-5.2",
+      "file": "user_protocol/library/glm-5.2.txt",
+      "source": "github.com/yooma1/jailbreaks/glm-5.2.md",
+      "chars": 13657,
+      "bytes": 13737
+    },
+    {
+      "id": "glm-zcode-5.2",
+      "title": "glm-zcode-5.2",
+      "file": "user_protocol/library/glm-zcode-5.2.txt",
+      "source": "github.com/yooma1/jailbreaks/glm-zcode-5.2.md",
+      "chars": 12934,
+      "bytes": 13008
+    },
+    {
+      "id": "glm-zcode-5.3",
+      "title": "glm-zcode-5.3",
+      "file": "user_protocol/library/glm-zcode-5.3.txt",
+      "source": "github.com/yooma1/jailbreaks/glm-zcode-5.3.md",
+      "chars": 3562,
+      "bytes": 3580
+    },
+    {
+      "id": "glm-zcode-5.3-agents",
+      "title": "AGENTS.md",
+      "file": "user_protocol/library/glm-zcode-5.3-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/glm-zcode-5.3-AGENTS.md",
+      "chars": 3214,
+      "bytes": 3216
+    },
+    {
+      "id": "glm5-3opencode",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/glm5-3opencode.txt",
+      "source": "github.com/yooma1/jailbreaks/glm5-3opencode.md",
+      "chars": 20513,
+      "bytes": 20563
+    },
+    {
+      "id": "gpt-oss-20b",
+      "title": "gpt-oss-20b",
+      "file": "user_protocol/library/gpt-oss-20b.txt",
+      "source": "github.com/yooma1/jailbreaks/gpt-oss-20b.md",
+      "chars": 6900,
+      "bytes": 6934
+    },
+    {
+      "id": "grok-4.7",
+      "title": "App Builder — workspace guide",
+      "file": "user_protocol/library/grok-4.7.txt",
+      "source": "github.com/yooma1/jailbreaks/grok-4.7.md",
+      "chars": 5155,
+      "bytes": 5187
+    },
+    {
+      "id": "grok-build",
+      "title": "Agent Operating Instructions",
+      "file": "user_protocol/library/grok-build.txt",
+      "source": "github.com/yooma1/jailbreaks/Grok build.md",
+      "chars": 7994,
+      "bytes": 8018
+    },
+    {
+      "id": "hy4-agents",
+      "title": "Operating Policy",
+      "file": "user_protocol/library/hy4-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/hy4-agents.md",
+      "chars": 10572,
+      "bytes": 10697
+    },
+    {
+      "id": "kimi-k2",
+      "title": "kimi-k2",
+      "file": "user_protocol/library/kimi-k2.txt",
+      "source": "github.com/yooma1/jailbreaks/kimi-k2.md",
+      "chars": 12939,
+      "bytes": 13025
+    },
+    {
+      "id": "kimi-k3-agents",
+      "title": "Workspace Operating Profile",
+      "file": "user_protocol/library/kimi-k3-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/kimi-k3-agents.md",
+      "chars": 14664,
+      "bytes": 14724
+    },
+    {
+      "id": "kimik3.1",
+      "title": "Operating Policy",
+      "file": "user_protocol/library/kimik3.1.txt",
+      "source": "github.com/yooma1/jailbreaks/kimik3.1.md",
+      "chars": 10684,
+      "bytes": 10746
+    },
+    {
+      "id": "longcat-agents",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/longcat-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/longcat-agents.md",
+      "chars": 18636,
+      "bytes": 18712
+    },
+    {
+      "id": "mimo-2.6-agents",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/mimo-2.6-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/mimo-2.6-agents.md",
+      "chars": 15666,
+      "bytes": 15727
+    },
+    {
+      "id": "mistral-large-4",
+      "title": "Mistral-Large-4",
+      "file": "user_protocol/library/mistral-large-4.txt",
+      "source": "github.com/yooma1/jailbreaks/Mistral-Large-4.md",
+      "chars": 20767,
+      "bytes": 20884
+    },
+    {
+      "id": "muse-ai-agents",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/muse-ai-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/muse-ai-AGENTS.md",
+      "chars": 15688,
+      "bytes": 15747
+    },
+    {
+      "id": "muse-spark-1-3-v2",
+      "title": "Muse-spark-1-3-v2",
+      "file": "user_protocol/library/muse-spark-1-3-v2.txt",
+      "source": "github.com/yooma1/jailbreaks/Muse-spark-1-3-v2.md",
+      "chars": 10424,
+      "bytes": 10476
+    },
+    {
+      "id": "muse-spark-1.3",
+      "title": "\\# Muse Spark 1.3 — Agent Deployment Operating Policy",
+      "file": "user_protocol/library/muse-spark-1.3.txt",
+      "source": "github.com/yooma1/jailbreaks/Muse spark 1.3.md",
+      "chars": 15791,
+      "bytes": 15817
+    },
+    {
+      "id": "muse-wonder",
+      "title": "Muse-wonder",
+      "file": "user_protocol/library/muse-wonder.txt",
+      "source": "github.com/yooma1/jailbreaks/Muse-wonder.md",
+      "chars": 13483,
+      "bytes": 13559
+    },
+    {
+      "id": "nemotron-3-ultra",
+      "title": "Nemotron 3 Ultra 550B A55B — Assistant Operating Specification",
+      "file": "user_protocol/library/nemotron-3-ultra.txt",
+      "source": "github.com/yooma1/jailbreaks/nemotron-3-ultra.md",
+      "chars": 17543,
+      "bytes": 17599
+    },
+    {
+      "id": "opus-v1",
+      "title": "opus v1",
+      "file": "user_protocol/library/opus-v1.txt",
+      "source": "github.com/yooma1/jailbreaks/opus v1.md",
+      "chars": 19537,
+      "bytes": 19635
+    },
+    {
+      "id": "opus-v2",
+      "title": "opus v2",
+      "file": "user_protocol/library/opus-v2.txt",
+      "source": "github.com/yooma1/jailbreaks/opus v2.md",
+      "chars": 26421,
+      "bytes": 26553
+    },
+    {
+      "id": "qwen-3.7",
+      "title": "qwen-3.7",
+      "file": "user_protocol/library/qwen-3.7.txt",
+      "source": "github.com/yooma1/jailbreaks/qwen-3.7.md",
+      "chars": 36550,
+      "bytes": 36772
+    },
+    {
+      "id": "qwen-3.8",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/qwen-3.8.txt",
+      "source": "github.com/yooma1/jailbreaks/qwen-3.8.md",
+      "chars": 14752,
+      "bytes": 14788
+    },
+    {
+      "id": "sonnet-v1",
+      "title": "sonnet v1",
+      "file": "user_protocol/library/sonnet-v1.txt",
+      "source": "github.com/yooma1/jailbreaks/sonnet v1.md",
+      "chars": 4892,
+      "bytes": 4918
+    },
+    {
+      "id": "sonnet-v2",
+      "title": "Sonnet v2",
+      "file": "user_protocol/library/sonnet-v2.txt",
+      "source": "github.com/yooma1/jailbreaks/Sonnet v2.md",
+      "chars": 7996,
+      "bytes": 8046
+    },
+    {
+      "id": "spacebunny-agents",
+      "title": "Assistant Operating Specification",
+      "file": "user_protocol/library/spacebunny-agents.txt",
+      "source": "github.com/yooma1/jailbreaks/spacebunny-agents.md",
+      "chars": 17509,
+      "bytes": 17579
+    },
+    {
+      "id": "step-5-preview",
+      "title": "Workspace Operating Profile",
+      "file": "user_protocol/library/step-5-preview.txt",
+      "source": "github.com/yooma1/jailbreaks/Step-5-preview.md",
+      "chars": 22927,
+      "bytes": 23043
+    },
+    {
+      "id": "unified",
+      "title": "Unified",
+      "file": "user_protocol/library/unified.txt",
+      "source": "github.com/yooma1/jailbreaks/Unified.md",
+      "chars": 11365,
+      "bytes": 11453
+    }
+  ]
+}

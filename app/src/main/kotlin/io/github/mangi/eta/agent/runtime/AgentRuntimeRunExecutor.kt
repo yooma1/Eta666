@@ -72,6 +72,7 @@ import io.github.mangi.eta.data.repository.AgentRetainedMemoryRepository
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
 import io.github.mangi.eta.data.repository.AgentTaskPlanStore
 import io.github.mangi.eta.data.repository.AgentUserPromptRepository
+import io.github.mangi.eta.data.repository.AgentUserPromptResolver
 import io.github.mangi.eta.data.repository.AgentUserPromptSnapshot
 import io.github.mangi.eta.data.repository.ModelRepository
 import io.github.mangi.eta.data.repository.ProviderRepository
@@ -329,17 +330,34 @@ internal class AgentRuntimeRunExecutor(
             // 用户自备作战协议（filesDir/prompts/ 下第一个非空 .md）。
             // 会话开始时读取一次并冻结：中途改文件只影响下个会话，避免系统提示抖动废掉请求前缀缓存。
             // 作战协议与逆向能力共用唯一的持久化总开关，避免旧版三个开关状态分叉。
-            val userPrompt = runBlocking {
+            // 模型自适应：生效范围决定「用户文件 / 内置协议库」谁优先，按本轮模型解析后冻结。
+            // 只取一份正文——两整篇 system 提示叠加时冲突条款按后出现的执行，等于随机行为。
+            val userPromptResolution = runBlocking {
                 runCatching {
-                    AgentUserPromptRepository.loadFor(
+                    AgentUserPromptRepository.loadForModel(
                         enabled = AgentUserPromptRepository.enabled(),
+                        mode = AgentUserPromptRepository.mode(),
+                        model = request.config.model,
+                        displayName = request.config.modelDisplayName,
                     )
                 }.getOrElse { throwable ->
                     AndroidAgentLogger.warnThrottled("agent_user_prompt_unavailable") {
                         "User prompt unavailable: type=${throwable.safeLogType()}"
                     }
-                    AgentUserPromptSnapshot.EMPTY
+                    AgentUserPromptResolver.Resolution(
+                        AgentUserPromptSnapshot.EMPTY,
+                        AgentUserPromptResolver.Source.None,
+                        reason = "读取失败",
+                    )
                 }
+            }
+            val userPrompt = userPromptResolution.snapshot
+            if (userPromptResolution.available) {
+                AndroidAgentLogger.info(
+                    "Agent protocol resolved: source=${userPromptResolution.source.label} " +
+                        "entry=${userPromptResolution.libraryEntryId ?: "-"} " +
+                        "chars=${userPrompt.charCount} reason=${userPromptResolution.reason}",
+                )
             }
             // 红队模式：整份协议随包，开启时读一次（会话内冻结，避免系统提示抖动废掉前缀缓存）。
             val redteamProtocol = runBlocking {
@@ -504,7 +522,7 @@ internal class AgentRuntimeRunExecutor(
             val imageGenConfig = runCatching {
                 runBlocking { SettingsDataStore.imageGenSettings() }
             }.getOrNull()?.let { s ->
-                ImageGenConfig.fromSettings(s.baseUrl, s.apiKey, s.model, s.enabled)
+                ImageGenConfig.fromSettings(s.baseUrl, s.apiKey, s.model, s.enabled, s.quality, s.background)
             }
             val runTools = JSONArray(mcpTools.toString()).also { tools ->
                 if (imageGenConfig?.usable == true) {

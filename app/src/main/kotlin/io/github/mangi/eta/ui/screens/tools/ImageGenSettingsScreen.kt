@@ -30,7 +30,9 @@ import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.agent.image.ImageGenClient
 import io.github.mangi.eta.agent.image.ImageGenConfig
 import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.ui.components.EtaOverlayDropdownPreference
 import io.github.mangi.eta.ui.components.EtaPreference
+import io.github.mangi.eta.ui.components.EtaPreferenceDivider
 import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
 import io.github.mangi.eta.ui.components.EtaPreferenceGroup
 import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
@@ -60,6 +62,8 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var model by remember { mutableStateOf("") }
+    var quality by remember { mutableStateOf("auto") }
+    var background by remember { mutableStateOf("auto") }
     var saving by remember { mutableStateOf(false) }
     var savedHint by remember { mutableStateOf<String?>(null) }
 
@@ -75,6 +79,8 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
         baseUrl = s.baseUrl
         apiKey = s.apiKey
         model = s.model
+        quality = s.quality
+        background = s.background
         loaded = true
     }
 
@@ -87,6 +93,8 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
                     baseUrl = baseUrl.trim(),
                     apiKey = apiKey.trim(),
                     model = model.trim(),
+                    quality = quality,
+                    background = background,
                 ),
             )
             saving = false
@@ -186,7 +194,7 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
                         fetchError = null
                         fetching = true
                         scope.launch {
-                            val cfg = ImageGenConfig.fromSettings(baseUrl, apiKey, model, enabled)
+                            val cfg = ImageGenConfig.fromSettings(baseUrl, apiKey, model, enabled, quality, background)
                             val result = ImageGenClient.fetchModels(cfg)
                             fetching = false
                             result
@@ -199,6 +207,49 @@ internal fun ImageGenSettingsScreen(onBack: () -> Unit) {
                         }
                     },
                 )
+            }
+        }
+
+        item(key = "params_title") { EtaPreferenceGroupTitle("默认生成参数") }
+        item(key = "params") {
+            val qualityOptions = listOf(
+                "auto" to "自动 (auto)",
+                "low" to "低画质 (low)",
+                "medium" to "中画质 (medium)",
+                "high" to "高画质 (high)",
+                "standard" to "标准 (standard · DALL-E 3)",
+                "hd" to "高清 (hd · DALL-E 3)",
+            )
+            val backgroundOptions = listOf(
+                "auto" to "自动 (auto)",
+                "opaque" to "不透明 (opaque)",
+                "transparent" to "透明背景 (transparent)",
+            )
+            Column {
+                EtaPreferenceGroup {
+                    EtaOverlayDropdownPreference(
+                        title = "画质 (quality)",
+                        summary = "模型调用未显式指定 quality 时使用的默认档位",
+                        items = qualityOptions.map { it.second },
+                        selectedIndex = qualityOptions.indexOfFirst { it.first == quality }.coerceAtLeast(0),
+                        onSelectedIndexChange = { idx ->
+                            quality = qualityOptions[idx].first
+                            persist(message = "画质已设为 ${qualityOptions[idx].first}")
+                        },
+                    )
+                    EtaPreferenceDivider()
+                    EtaOverlayDropdownPreference(
+                        title = "背景 (background)",
+                        summary = "支持 gpt-image 系列输出透明底 PNG（图标/贴纸/抠图素材）",
+                        items = backgroundOptions.map { it.second },
+                        selectedIndex = backgroundOptions.indexOfFirst { it.first == background }.coerceAtLeast(0),
+                        onSelectedIndexChange = { idx ->
+                            background = backgroundOptions[idx].first
+                            persist(message = "背景已设为 ${backgroundOptions[idx].first}")
+                        },
+                    )
+                }
+                ImageGenNote("当服务端或模型不支持 quality / background 参数时，客户端会自动降级剥离并重试。")
             }
         }
 

@@ -37,6 +37,8 @@ internal object Prefs {
         const val SCREEN_ON_VOICE_COMMAND = "screen_on_voice_command"
         const val AGENT_CUSTOM_MODEL = "agent_custom_model"
         const val AGENT_REQUIRE_PREFIX = "agent_require_prefix"
+        /** 借用小布自身模型：只读旁路小布下行的 StreamTextCard，不改小布行为。 */
+        const val AGENT_BORROW_BREENO = "agent_borrow_breeno"
         const val AGENT_TERMINAL_TOOLS = "agent_terminal_tools"
         const val AGENT_SUBAGENT_TOOLS = "agent_subagent_tools"
         /** 空 = 跟随主模型；否则为 ProviderRepository 里的模型 id。 */
@@ -71,6 +73,7 @@ internal object Prefs {
             SCREEN_ON_VOICE_COMMAND to false,
             AGENT_CUSTOM_MODEL to true,
             AGENT_REQUIRE_PREFIX to false,
+            AGENT_BORROW_BREENO to false,
             AGENT_TERMINAL_TOOLS to true,
             AGENT_SUBAGENT_TOOLS to true,
             AGENT_BROWSER_TOOLS to true,

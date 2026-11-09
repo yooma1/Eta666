@@ -145,6 +145,15 @@ internal sealed interface AgentUserPromptAction {
 
     /** 把随包内置的破甲记忆装配成效文件（覆盖当前，旧文件先备份）。 */
     data object InstallBuiltin : AgentUserPromptAction
+
+    /** 装配 v6 模板（身份按当前模型填）；失败自动退回内置版本并在页面上说明。 */
+    data object InstallTemplate : AgentUserPromptAction
+
+    /** 内置协议库（移植自 yooma1/jailbreaks）的搜索词。 */
+    data class LibraryQueryChanged(val query: String) : AgentUserPromptAction
+
+    /** 装配库里的一条：先备份当前生效文件，再原子写入。 */
+    data class InstallLibraryEntry(val id: String) : AgentUserPromptAction
     /** 破甲记忆注入开关：与逆向能力开关平级，各管各的。 */
     data class EnabledChanged(val enabled: Boolean) : AgentUserPromptAction
 }

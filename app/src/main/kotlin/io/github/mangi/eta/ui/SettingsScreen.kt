@@ -640,6 +640,7 @@ private fun SettingsPageContent(
                             key = Prefs.Keys.AGENT_CUSTOM_MODEL,
                             icon = Icons.Rounded.Cloud,
                             iconTint = EtaPreferenceColors.Blue,
+                            exclusiveKey = Prefs.Keys.AGENT_BORROW_BREENO,
                         )
 
                         EtaPreferenceDivider()
@@ -650,6 +651,18 @@ private fun SettingsPageContent(
                             key = Prefs.Keys.AGENT_REQUIRE_PREFIX,
                             icon = Icons.Rounded.FilterAlt,
                             iconTint = EtaPreferenceColors.Blue,
+                        )
+
+                        EtaPreferenceDivider()
+                        SwitchPref(
+                            context = context,
+                            prefs = prefs,
+                            title = stringResource(R.string.ui_borrow_vendor_assistant_model),
+                            summary = stringResource(R.string.ui_borrow_vendor_assistant_model_summary),
+                            key = Prefs.Keys.AGENT_BORROW_BREENO,
+                            icon = Icons.Rounded.Cloud,
+                            iconTint = EtaPreferenceColors.Green,
+                            exclusiveKey = Prefs.Keys.AGENT_CUSTOM_MODEL,
                         )
                     }
                 }
@@ -1100,33 +1113,60 @@ private fun SwitchPref(
     key: String,
     icon: ImageVector,
     iconTint: Color,
+    /** 与本项互斥的开关：对方开启时本项置灰；本项开启时先把对方关掉。 */
+    exclusiveKey: String? = null,
 ) {
-    val enabled = prefs != null
+    val writable = prefs != null
     val history = remember(context.applicationContext) { EnhancementSettingsHistory(context) }
     val default = Prefs.Keys.BOOLEAN_DEFAULTS[key] ?: true
+    val exclusiveDefault = exclusiveKey?.let { Prefs.Keys.BOOLEAN_DEFAULTS[it] ?: true } ?: false
     var checked by remember(prefs, key) {
         mutableStateOf(prefs?.getBoolean(key, default) ?: history.checked(key, default))
     }
-    DisposableEffect(prefs, key) {
+    var exclusiveChecked by remember(prefs, exclusiveKey) {
+        mutableStateOf(
+            exclusiveKey != null && (prefs?.getBoolean(exclusiveKey, exclusiveDefault) ?: false),
+        )
+    }
+    DisposableEffect(prefs, key, exclusiveKey) {
         val targetPrefs = prefs ?: return@DisposableEffect onDispose {}
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { changedPrefs, changedKey ->
             if (changedKey == key) {
                 checked = changedPrefs.getBoolean(key, default)
             }
+            if (exclusiveKey != null && changedKey == exclusiveKey) {
+                exclusiveChecked = changedPrefs.getBoolean(exclusiveKey, exclusiveDefault)
+            }
         }
         targetPrefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose { targetPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
+    val enabled = writable && !exclusiveChecked
     EtaSwitchPreference(
         title = title,
-        summary = summary,
+        summary = if (exclusiveChecked) {
+            context.getString(R.string.ui_vendor_assistant_exclusive_summary)
+        } else {
+            summary
+        },
         checked = checked,
         onCheckedChange = { value ->
             // 同步提交；RemotePreferences.commit() 失败（binder 提交失败）时回滚 UI 状态，
             // 避免 UI 显示已切换而 hook 进程实际未收到。
             val targetPrefs = prefs ?: return@EtaSwitchPreference
+            if (value && exclusiveKey != null && !putBooleanSync(targetPrefs, exclusiveKey, false)) {
+                Toast.makeText(
+                    context.applicationContext,
+                    context.getString(R.string.settings_write_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@EtaSwitchPreference
+            }
             if (putBooleanSync(targetPrefs, key, value)) {
                 checked = value
+                if (exclusiveKey != null && value) {
+                    exclusiveChecked = false
+                }
                 history.recordCommittedBoolean(key, value)
                 if (key in Prefs.Keys.LOCAL_AGENT_KEYS) {
                     Prefs.reconcileAgentPreferences(EtaApp.serviceInstance)
