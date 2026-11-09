@@ -14,7 +14,6 @@ import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.FilterAlt
@@ -527,19 +526,6 @@ private fun SettingsPageContent(
                             )
                         },
                         onClick = { onNavigate(AppRoute.Subagent) },
-                    )
-
-                    EtaPreferenceDivider()
-                    EtaArrowPreference(
-                        title = "上下文压缩",
-                        summary = "独立压缩模型、思考强度与摘要提示词",
-                        startAction = {
-                            EtaPreferenceIcon(
-                                icon = Icons.Rounded.Compress,
-                                tint = EtaPreferenceColors.Green,
-                            )
-                        },
-                        onClick = { onNavigate(AppRoute.CompactionSettings) },
                     )
 
                     EtaPreferenceDivider()

@@ -712,6 +712,15 @@ private fun AgentMessageBlock(
                             enabled = messageActionsEnabled,
                         )
                     }
+                }
+                val statsUsage = message.usage
+                if (!assistantOverlay && statsUsage != null && statsUsage.hasStats) {
+                    MessageStatsPill(
+                        usage = statsUsage,
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                }
+                if (showMessageActions) {
                     if (message.characterEditable && message.candidateCount > 1) {
                         Spacer(Modifier.weight(1f))
                         CandidateSwitcher(

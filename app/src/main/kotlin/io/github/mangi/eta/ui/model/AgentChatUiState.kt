@@ -150,13 +150,35 @@ data class TokenUsageUi(
     val outputTokens: Int? = null,
     val reasoningTokens: Int? = null,
     val cachedTokens: Int? = null,
+    val stepCount: Int? = null,
+    val llmMs: Long? = null,
+    val toolMs: Long? = null,
+    val ttftMs: Long? = null,
+    val ttftSteps: Int? = null,
+    val decodeMs: Long? = null,
+    val decodeTokens: Int? = null,
 ) {
+    val hasStats: Boolean
+        get() {
+            if ((llmMs ?: 0L) > 0L || (toolMs ?: 0L) > 0L) return true
+            if (ttftMs != null && (ttftSteps ?: 1) > 0) return true
+            val tokens = decodeTokens ?: outputTokens ?: 0
+            return (decodeMs ?: 0L) > 0L && tokens > 0
+        }
+
     val isEmpty: Boolean
         get() = contextTokens == null &&
             inputTokens == null &&
             outputTokens == null &&
             reasoningTokens == null &&
-            cachedTokens == null
+            cachedTokens == null &&
+            stepCount == null &&
+            llmMs == null &&
+            toolMs == null &&
+            ttftMs == null &&
+            ttftSteps == null &&
+            decodeMs == null &&
+            decodeTokens == null
 }
 
 @Immutable
