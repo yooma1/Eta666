@@ -1,6 +1,7 @@
 package io.github.mangi.eta.agent.subagent
 
 import io.github.mangi.eta.agent.model.AgentToolSchema
+import io.github.mangi.eta.agent.tool.SubAgentComplexity
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -96,6 +97,29 @@ internal object AgentSubagentToolCatalog {
                     .put(
                         "description",
                         "Optional subagent_id from a previous `subagent` result in this conversation to continue its existing context.",
+                    ),
+            )
+            .put(
+                "complexity",
+                JSONObject()
+                    .put("type", "string")
+                    .put(
+                        "enum",
+                        JSONArray(
+                            listOf(
+                                SubAgentComplexity.Simple.wireValue,
+                                SubAgentComplexity.Normal.wireValue,
+                                SubAgentComplexity.Complex.wireValue,
+                            ),
+                        ),
+                    )
+                    .put(
+                        "description",
+                        "Optional task complexity controlling the round budget: " +
+                            SubAgentComplexity.describeAll() + ". " +
+                            "Pass complex for deep multi-file audits, refactoring, reverse engineering, " +
+                            "or build test loops so the subagent does not hit the round limit mid-way. " +
+                            "Omit to estimate automatically from the prompt.",
                     ),
             )
         val parameters = JSONObject()

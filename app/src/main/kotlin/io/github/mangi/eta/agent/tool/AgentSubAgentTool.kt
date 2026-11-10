@@ -185,8 +185,7 @@ internal class AgentSubAgentTool(
                                                     .put(
                                                         "description",
                                                         "这条子任务的复杂度，决定它能跑多少轮：" +
-                                                            "simple=6 轮（一两步就能做完）、normal=12 轮、" +
-                                                            "complex=24 轮（要通读多份材料或反复验证）。" +
+                                                            SubAgentComplexity.describeAll() + "。" +
                                                             "省略时按 prompt 的长度与信号词自动估。不要一律填 complex。",
                                                     ),
                                             ),

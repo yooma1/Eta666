@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.subagent
 import android.os.SystemClock
 import io.github.mangi.eta.agent.memory.AgentMemoryContext
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.AgentModelFailure
 import io.github.mangi.eta.agent.model.AgentModelExecutionException
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
@@ -10,6 +11,8 @@ import io.github.mangi.eta.agent.runtime.AgentRunController
 import io.github.mangi.eta.agent.skill.SkillContext
 import io.github.mangi.eta.agent.terminal.TerminalExecutionContext
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
+import io.github.mangi.eta.agent.tool.SubAgentBudget
+import io.github.mangi.eta.agent.tool.SubAgentComplexity
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
@@ -168,7 +171,11 @@ internal class SubagentExecutor(
             supportsSearchSuggestions = false,
         )
 
-        val maxRounds = 40
+        // 轮次预算按 complexity 分档（10/30/80），主代理可用 complexity 显式覆盖；
+        // 未声明时按 prompt 长度与信号词估算。硬编码固定值会让复杂任务半路被掐断。
+        val declaredComplexity = SubAgentComplexity.fromWire(args.optString("complexity"))
+        val complexity = SubAgentBudget.complexityOf(prompt, declaredComplexity)
+        val maxRounds = complexity.rounds
         val failureAbort = 5
         var abortCode: String? = null
         var abortReason: String? = null
@@ -190,6 +197,9 @@ internal class SubagentExecutor(
                 sessionId = "$conversationKey-$subagentId",
                 operationId = "${toolCall.id}-$subagentId",
                 toolFilter = profile::filterTools,
+                // 同时交给 AgentLoop：ToolStarted 只能拦住「下一轮还调工具」的情况，
+                // 轮次用尽却不再调工具的那一轮由 loop 的 ROUND_LIMIT 兜底。
+                maxRounds = maxRounds,
                 onEvent = { childEvent ->
                     if (abortCode == null) {
                         when (childEvent) {
@@ -235,6 +245,8 @@ internal class SubagentExecutor(
                     .put("subagent_type", profile.name)
                     .put("description", description)
                     .put("model", modelLabel)
+                    .put("complexity", complexity.wireValue)
+                    .put("max_rounds", maxRounds)
                     .put("status", SubagentActivitySnapshot.STATUS_COMPLETED)
                     .put("tool_calls", tracker.toolCount())
                     .put("summary", response.content)
@@ -260,6 +272,18 @@ internal class SubagentExecutor(
             val cancelled = parentController.isCancelled ||
                 childController.isCancelled ||
                 throwable is AgentRunCancelledException
+            // AgentLoop 自己抛的 ROUND_LIMIT 不会经过 ToolStarted 钩子，
+            // 这里补成同一个 code，主代理才分得清「轮次用尽」和「跑挂了」。
+            if (abortCode == null && !cancelled) {
+                val failure = generateSequence<Throwable>(throwable) { it.cause }
+                    .filterIsInstance<AgentModelFailure>()
+                    .firstOrNull()
+                if (failure?.code == "ROUND_LIMIT") {
+                    abortCode = "SUBAGENT_ROUND_LIMIT"
+                    abortReason = failure.message
+                        ?: "已到轮次上限（$maxRounds 轮），子智能体被自动中止。"
+                }
+            }
             val errorMessage = when {
                 abortReason != null -> abortReason
                 cancelled -> "已停止"
@@ -284,6 +308,9 @@ internal class SubagentExecutor(
                     .put("subagent_type", profile.name)
                     .put("description", description)
                     .put("model", modelLabel)
+                    // 失败时也要给出档位：主代理据此判断是升档重派还是缩小任务范围。
+                    .put("complexity", complexity.wireValue)
+                    .put("max_rounds", maxRounds)
                     .put(
                         "status",
                         if (cancelled) {

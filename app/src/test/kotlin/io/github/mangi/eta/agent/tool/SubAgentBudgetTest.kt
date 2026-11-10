@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.tool
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SubAgentBudgetTest {
@@ -19,7 +20,7 @@ class SubAgentBudgetTest {
         val prompt = "检查 app/src/main 下所有 Kotlin 文件的 import 顺序是否一致，" +
             "把不一致的列出来但不要改。".repeat(12)
         assertEquals(SubAgentComplexity.Normal, SubAgentBudget.estimate(prompt))
-        assertEquals(20, SubAgentBudget.roundsFor(prompt, declared = null))
+        assertEquals(30, SubAgentBudget.roundsFor(prompt, declared = null))
     }
 
     @Test
@@ -34,7 +35,7 @@ class SubAgentBudgetTest {
             SubAgentComplexity.Complex,
             SubAgentBudget.estimate("逐一对比三个模块，并分别验证它们的入口"),
         )
-        assertEquals(40, SubAgentBudget.roundsFor("逐一对比并分别验证", declared = null))
+        assertEquals(80, SubAgentBudget.roundsFor("逐一对比并分别验证", declared = null))
     }
 
     @Test
@@ -45,7 +46,7 @@ class SubAgentBudgetTest {
             SubAgentBudget.roundsFor("很长很长的任务说明".repeat(200), SubAgentComplexity.Simple),
         )
         assertEquals(
-            40,
+            80,
             SubAgentBudget.roundsFor("一句话", SubAgentComplexity.Complex),
         )
     }
@@ -58,5 +59,18 @@ class SubAgentBudgetTest {
         assertEquals(SubAgentComplexity.Complex, SubAgentComplexity.fromWire(" COMPLEX "))
         assertNull(SubAgentComplexity.fromWire("unknown"))
         assertNull(SubAgentComplexity.fromWire(null))
+    }
+
+    @Test
+    fun schemaDescriptionIsGeneratedFromTheEnumInsteadOfHandCopied() {
+        // 手抄的轮数漂移过两次，所以文案必须由枚举生成：这里锁住"三个档位都在、轮数一致"。
+        val text = SubAgentComplexity.describeAll()
+        SubAgentComplexity.entries.forEach { level ->
+            assertTrue(
+                "缺少 ${level.wireValue}=${level.rounds} 轮，实际：$text",
+                text.contains("${level.wireValue}=${level.rounds} 轮"),
+            )
+        }
+        assertEquals("simple=10 轮 / normal=30 轮 / complex=80 轮", text)
     }
 }

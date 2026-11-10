@@ -192,6 +192,9 @@ internal object AgentPromptBuilder {
                         "只有当用户明确要求‘保存/添加一个以后可复用的自定义 Subagent 模板’时，才调用 subagent_profile(action=\"save\", ...)。" +
                         "多个独立的子任务应在同一轮一并发出多个 subagent 调用，由 Runtime 自动并行执行；" +
                         "简单直接的单步查询优先直接调用对应工具，不必绕经 subagent。" +
+                        "派发时按工作量传 complexity（simple=10 轮 / normal=30 轮 / complex=80 轮）：" +
+                        "要跨多个文件通读、反复改与构建验证、或反编译时传 complex，否则它会在轮次上限处被中止；" +
+                        "省略时按 prompt 长度与信号词自动估。" +
                         "子智能体没有当前会话上下文，也不执行屏幕 GUI 手势；派发时提供完整目标与已知线索，收到汇总结果后由你向用户统一作答。"
                 )
             )
@@ -281,9 +284,9 @@ internal object AgentPromptBuilder {
                 appendLine("推进方式：")
                 appendLine("- 动手前先用 task_write 把目标拆成 3–8 条可独立验证的子任务（pending），之后每完成一条立即改成 done，再做下一条。")
                 appendLine("- 不要只把拆解写在回答里：不写进 task_write 的清单，下一轮就会被忘记。")
-                appendLine("- 有 2 个以上互不依赖的子任务时，用 spawn_agents 并行派出去，而不是自己一条条串行做。")
+                appendLine("- 有 2 个以上互不依赖的子任务时，在同一轮里发多个 subagent 调用并行派出去，而不是自己一条条串行做。")
                 appendLine("- 需要「独立上下文里干一件事，只要结论」时，用 subagent（explore/coder/plan 或临时 kebab-case 类型）；接着同一份上下文继续问就带 resume=subagent_id；要把某个角色存成模板再用 subagent_profile 落盘。")
-                appendLine("- 派 subagent 时自己判断工作量并传 complexity（simple/normal/complex → 10/20/40 轮）；多项检查、要通读多份材料就传 complex，别让它跑到一半被轮次上限掐断。")
+                appendLine("- 派 subagent 时自己判断工作量并传 complexity（simple/normal/complex → 10/30/80 轮）；多项检查、要通读多份材料就传 complex，别让它跑到一半被轮次上限掐断。")
                 appendLine("- 用户发来与目标无关的新问题时，先正常回答那个问题，不要硬把话题拉回目标；回答完再继续目标。")
                 appendLine("- 目标未达成就继续做；不要把中间进度当成完成，也不要等用户追问才继续。")
                 appendLine("- 已经完成或已经验证过的步骤不要重做；先确认现状，再处理剩余部分。")

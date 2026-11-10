@@ -5,15 +5,15 @@ package io.github.mangi.eta.agent.tool
  *
  * 一轮 = 一次模型请求 + 它返回的那批工具调用执行完。
  *
- * 分档而不是给所有人同一个上限：给简单任务 40 轮是浪费（它早该结束了，
+ * 分档而不是给所有人同一个上限：给简单任务 80 轮是浪费（它早该结束了，
  * 多出来的轮次只会让它反复改同一处），给复杂任务 10 轮又会半路掐断。
  *
- * 档位值是实测调过的：10/20/40。原来的 6/12/24 在「一次要跑六项检查」这类
- * 中等任务上会在 12 轮被砍断（子代理把轮次花在 read_file/grep 上，还没写结论）。
+ * 档位值是实测调过的：10/30/80。原来的 10/20/40 在复杂工程任务上仍会在 40 轮被砍断
+ * （子代理把轮次花在跨文件探索、反编译、修改与构建验证上，还没收尾）。
  * 主代理若判断工作量，应显式传 `complexity`，不要靠 prompt 长度去猜。
  *
  * 复杂度有两个来源，优先级从高到低：
- * 1. 主代理在 `spawn_agents` 里显式声明的 `complexity`；
+ * 1. 主代理在 `subagent` / `spawn_agents` 里显式声明的 `complexity`；
  * 2. 没声明时按任务说明的长度与信号词估算。
  *
  * 之所以保留显式声明：模型自己知道这条子任务要看几个文件、跑几条命令；
@@ -21,13 +21,20 @@ package io.github.mangi.eta.agent.tool
  */
 internal enum class SubAgentComplexity(val wireValue: String, val rounds: Int) {
     Simple("simple", 10),
-    Normal("normal", 20),
-    Complex("complex", 40),
+    Normal("normal", 30),
+    Complex("complex", 80),
     ;
 
     companion object {
         fun fromWire(value: String?): SubAgentComplexity? =
             entries.firstOrNull { it.wireValue == value?.trim()?.lowercase() }
+
+        /**
+         * 给模型看的档位说明。做成生成式是有原因的：文案里手抄的轮数已经和枚举值
+         * 漂移过两次（6/12/24 改成 10/20/40 时漏改，再改成 10/30/80 时又漏一次）。
+         */
+        fun describeAll(): String =
+            entries.joinToString(" / ") { "${it.wireValue}=${it.rounds} 轮" }
     }
 }
 
