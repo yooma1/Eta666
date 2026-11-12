@@ -85,18 +85,23 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "file_search", "file_search_call", "文件搜索" -> Icons.AutoMirrored.Rounded.ManageSearch
     "code_interpreter", "code_interpreter_call", "代码执行" -> Icons.Rounded.Terminal
     "computer", "computer_call", "计算机操作" -> Icons.Rounded.Computer
-    "image_generation", "image_generation_call", "图像生成" -> Icons.Rounded.Image
+    "image_generation", "image_generation_call", "generate_image", "图像生成" -> Icons.Rounded.Image
     "mcp_call", "MCP 工具" -> Icons.Rounded.Extension
-    "memory_get", "memory_write", "character_memory_get", "character_memory_write" ->
-        Icons.Rounded.Psychology
+    "memory_get", "memory_write", "character_memory_get", "character_memory_write",
+    "knowledge_search", "knowledge_get", "knowledge_save", "knowledge_delete",
+        -> Icons.Rounded.Psychology
     "release_gui" -> Icons.Rounded.Smartphone
     "present_to_user" -> Icons.AutoMirrored.Rounded.OpenInNew
     "press_key" -> Icons.Rounded.KeyboardCommandKey
     "open_system_panel" -> Icons.Rounded.WebAsset
     "read_image" -> Icons.Rounded.Image
-    "skills_list", "skills_read", "skills_read_resource",
+    "skills_list", "skills_read", "skills_read_resource", "skills_suggest",
     "skills_list_curated", "skills_inspect_github", "skills_install_from_github",
         -> Icons.Rounded.Extension
+    "process_list", "mem_read", "mem_search", "mem_write", "frida_ps", "frida_script" ->
+        Icons.Rounded.Terminal
+    "conversation_history", "task_write" ->
+        Icons.Rounded.Description
     "set_alarm", "set_timer", "list_alarms", "list_active_timers" ->
         Icons.Rounded.Alarm
     "device_status", "set_device_state", "get_device_environment" ->

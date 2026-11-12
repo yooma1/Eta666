@@ -31,6 +31,7 @@ sealed interface AgentHomeAction {
     data class RetryFailedRun(val id: String) : AgentHomeAction
     /** 失败提示下的“继续”：以一条“继续”把没跑完的任务接着推。 */
     data object ContinueRun : AgentHomeAction
+    data class BranchConversation(val conversationId: String, val messageId: String) : AgentHomeAction
     data class SelectReplyCandidate(val id: String, val index: Int) : AgentHomeAction
     data object OpenTools : AgentHomeAction
     data object OpenSkills : AgentHomeAction

@@ -65,13 +65,12 @@ internal class AgentLoop(
     private val accumulatedReasoning = StringBuilder()
     private val sensitiveToolCallIds = linkedSetOf<String>()
     private val toolBatchLock = Any()
-    private val turnUsage = TurnUsageTotals()
     private companion object {
         const val GENERATED_IMAGE_ID_PREFIX = "generated-image-"
-        fun nowMillis(): Long = System.nanoTime() / 1_000_000L
     }
 
     private var pendingToolImageMessage: JSONObject? = null
+    private val turnMetrics = TurnMetricsAccumulator()
     private val context = AgentContextSession(
         config, messages, systemCount, operationId, provider, runController,
         { sensitiveToolCallIds }, onEvent, onContextSnapshot, { transcript.length() },
@@ -148,8 +147,8 @@ internal class AgentLoop(
             )
             var roundInputTokens: Int? = null
             var roundUsage: AgentTokenUsage? = null
-            var requestStartedMs = nowMillis()
-            var firstTokenMs: Long? = null
+            var stepStartedAtMs = monotonicNowMs()
+            var firstTokenAtMs: Long? = null
             val reasoningLengthBeforeRound = accumulatedReasoning.length
             val completedRound = try {
                 modelRetry.complete(
@@ -161,8 +160,8 @@ internal class AgentLoop(
                         if (event is AgentEvent.RoundStarted) {
                             roundInputTokens = null
                             roundUsage = null
-                            requestStartedMs = nowMillis()
-                            firstTokenMs = null
+                            stepStartedAtMs = monotonicNowMs()
+                            firstTokenAtMs = null
                         }
                         onEvent(event)
                     },
@@ -173,21 +172,25 @@ internal class AgentLoop(
                             throw AgentModelFailure("REPLY_REWRITE_TOOL_CALL", false, "改写回复时模型请求了工具，已停止；原回复未改变。")
                         }
                         if (providerEvent is ProviderEvent.RequestStarted) {
-                            requestStartedMs = nowMillis()
-                            firstTokenMs = null
+                            stepStartedAtMs = monotonicNowMs()
+                            firstTokenAtMs = null
                         }
-                        if (firstTokenMs == null && providerEvent is ProviderEvent.BlockDelta && providerEvent.delta.isNotEmpty()) {
-                            firstTokenMs = nowMillis()
+                        if (firstTokenAtMs == null &&
+                            providerEvent is ProviderEvent.BlockDelta &&
+                            providerEvent.delta.isNotEmpty()
+                        ) {
+                            firstTokenAtMs = monotonicNowMs()
                         }
                         if (providerEvent is ProviderEvent.Usage) {
                             roundUsage = providerEvent.usage
                             roundInputTokens = providerEvent.contextInputTokens ?: roundInputTokens
-                        } else {
-                            if (providerEvent is ProviderEvent.BlockDelta &&
-                                providerEvent.kind == AssistantBlockKind.THINKING
-                            ) {
-                                accumulatedReasoning.append(providerEvent.delta)
-                            }
+                        }
+                        if (providerEvent is ProviderEvent.BlockDelta &&
+                            providerEvent.kind == AssistantBlockKind.THINKING
+                        ) {
+                            accumulatedReasoning.append(providerEvent.delta)
+                        }
+                        if (providerEvent !is ProviderEvent.Usage) {
                             providerEvent.toAgentEvent(attemptRound)?.let(onEvent)
                         }
                     },
@@ -200,10 +203,10 @@ internal class AgentLoop(
                 // 同一回合的重试仍需原始观察；整个回合结束后才移除截图。
                 discardPendingToolImageMessage()
             }
-            val finishedMs = nowMillis()
-            val roundLlmMs = (finishedMs - requestStartedMs).coerceAtLeast(0L)
-            val roundTtftMs = firstTokenMs?.let { (it - requestStartedMs).coerceAtLeast(0L) }
-            val roundDecodeMs = firstTokenMs?.let { (finishedMs - it).coerceAtLeast(0L) }
+            val completedAtMs = monotonicNowMs()
+            val stepLlmMs = (completedAtMs - stepStartedAtMs).coerceAtLeast(0L)
+            val stepTtftMs = firstTokenAtMs?.let { (it - stepStartedAtMs).coerceAtLeast(0L) }
+            val stepDecodeMs = firstTokenAtMs?.let { (completedAtMs - it).coerceAtLeast(0L) }
             context.observeInputTokens(roundInputTokens)
             round = completedRound.round
             val providerResponse = completedRound.response
@@ -261,15 +264,15 @@ internal class AgentLoop(
                     toolNames = toolCalls.map { it.name },
                 )
             )
-            val aggregatedUsage = turnUsage.recordStep(
-                llmMs = roundLlmMs,
-                ttftMs = roundTtftMs,
-                decodeMs = roundDecodeMs,
-                usage = roundUsage,
-                contextInputTokens = roundInputTokens,
+            val accumulatedUsage = turnMetrics.recordStep(
+                stepLlmMs = stepLlmMs,
+                stepTtftMs = stepTtftMs,
+                stepDecodeMs = stepDecodeMs,
+                stepUsage = roundUsage,
+                stepPromptTokens = roundInputTokens,
             )
-            if (!aggregatedUsage.isEmpty) {
-                onEvent(AgentEvent.UsageReceived(round = round, usage = aggregatedUsage))
+            if (!accumulatedUsage.isEmpty) {
+                onEvent(AgentEvent.UsageReceived(round = round, usage = accumulatedUsage))
             }
 
             if (toolCalls.isNotEmpty()) {
@@ -367,7 +370,7 @@ internal class AgentLoop(
         val supplement = runController.pollSteeringMessage() ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        turnUsage.reset()
+        turnMetrics.reset()
         return true
     }
 
@@ -379,7 +382,7 @@ internal class AgentLoop(
         } ?: return false
         appendMessage(steeringMessage(supplement))
         context.userAppended()
-        turnUsage.reset()
+        turnMetrics.reset()
         return true
     }
 
@@ -444,7 +447,7 @@ internal class AgentLoop(
             ).put("_eta_message_id", "user-$operationId-goal-$goalContinuations"),
         )
         context.userAppended()
-        turnUsage.reset()
+        turnMetrics.reset()
         return true
     }
 
@@ -531,7 +534,7 @@ internal class AgentLoop(
             supervisorScope {
                 calls.map { toolCall ->
                     async {
-                        val startedMs = nowMillis()
+                        val toolStartMs = monotonicNowMs()
                         val result = try {
                             toolExecutor.execute(toolCall)
                         } catch (throwable: Exception) {
@@ -553,13 +556,13 @@ internal class AgentLoop(
                                 )
                             }
                         }
-                        val elapsedMs = (nowMillis() - startedMs).coerceAtLeast(0L)
+                        val elapsedMs = (monotonicNowMs() - toolStartMs).coerceAtLeast(0L)
                         synchronized(toolBatchLock) {
                             if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(toolCall.name)) {
                                 sensitiveToolCallIds += toolCall.id
                             }
                             if (!runController.isCancelled) {
-                                turnUsage.addToolDuration(elapsedMs)
+                                turnMetrics.recordToolMs(elapsedMs)
                                 emitToolFinished(round, toolCall, result)
                             }
                         }
@@ -596,7 +599,7 @@ internal class AgentLoop(
             )
         )
 
-        val startedMs = nowMillis()
+        val toolStartMs = monotonicNowMs()
         val result = try {
             toolExecutor.execute(roundCall)
         } catch (throwable: Exception) {
@@ -609,7 +612,7 @@ internal class AgentLoop(
                     .toString(),
             )
         }
-        turnUsage.addToolDuration((nowMillis() - startedMs).coerceAtLeast(0L))
+        turnMetrics.recordToolMs((monotonicNowMs() - toolStartMs).coerceAtLeast(0L))
         if (result.sensitive || AgentSensitiveToolPolicy.isSensitive(roundCall.name)) {
             sensitiveToolCallIds += roundCall.id
         }
@@ -793,6 +796,80 @@ internal class AgentLoop(
             AssistantBlockKind.TOOL_CALL -> AgentEvent.AssistantBlockKind.TOOL_CALL
         }
 
+    private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
+    private class TurnMetricsAccumulator {
+        private var stepCount: Int = 0
+        private var llmMs: Long = 0L
+        private var toolMs: Long = 0L
+        private var ttftMs: Long = 0L
+        private var ttftSteps: Int = 0
+        private var decodeMs: Long = 0L
+        private var decodeTokens: Int = 0
+        private var contextTokens: Int? = null
+        private var inputTokens: Int? = null
+        private var outputTokens: Int? = null
+        private var reasoningTokens: Int? = null
+        private var cachedTokens: Int? = null
+
+        fun reset() {
+            stepCount = 0
+            llmMs = 0L
+            toolMs = 0L
+            ttftMs = 0L
+            ttftSteps = 0
+            decodeMs = 0L
+            decodeTokens = 0
+            contextTokens = null
+            inputTokens = null
+            outputTokens = null
+            reasoningTokens = null
+            cachedTokens = null
+        }
+
+        fun recordStep(
+            stepLlmMs: Long,
+            stepTtftMs: Long?,
+            stepDecodeMs: Long?,
+            stepUsage: AgentTokenUsage?,
+            stepPromptTokens: Int? = null,
+        ): AgentTokenUsage {
+            stepCount += 1
+            llmMs += stepLlmMs.coerceAtLeast(0L)
+            if (stepTtftMs != null) {
+                ttftMs += stepTtftMs.coerceAtLeast(0L)
+                ttftSteps += 1
+            }
+            val stepOut = stepUsage?.outputTokens
+            if (stepDecodeMs != null && stepOut != null && stepOut > 0) {
+                decodeMs += stepDecodeMs.coerceAtLeast(0L)
+                decodeTokens += stepOut
+            }
+            stepUsage?.contextTokens?.let { contextTokens = it }
+            (stepPromptTokens ?: stepUsage?.inputTokens)?.let { inputTokens = (inputTokens ?: 0) + it }
+            stepUsage?.outputTokens?.let { outputTokens = (outputTokens ?: 0) + it }
+            stepUsage?.reasoningTokens?.let { reasoningTokens = (reasoningTokens ?: 0) + it }
+            stepUsage?.cachedTokens?.let { cachedTokens = (cachedTokens ?: 0) + it }
+            return AgentTokenUsage(
+                contextTokens = contextTokens,
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                reasoningTokens = reasoningTokens,
+                cachedTokens = cachedTokens,
+                stepCount = stepCount.takeIf { it > 0 },
+                llmMs = llmMs.takeIf { stepCount > 0 },
+                toolMs = toolMs.takeIf { it > 0L },
+                ttftMs = ttftMs.takeIf { ttftSteps > 0 },
+                ttftSteps = ttftSteps.takeIf { it > 0 },
+                decodeMs = decodeMs.takeIf { decodeTokens > 0 && it > 0L },
+                decodeTokens = decodeTokens.takeIf { decodeMs > 0L && it > 0 },
+            )
+        }
+
+        fun recordToolMs(elapsedMs: Long) {
+            toolMs += elapsedMs.coerceAtLeast(0L)
+        }
+    }
 }
 
 /** 连续被拒多少个子任务后升级为失败（此前每次仅跳过当前子任务并续跑）。 */
@@ -821,84 +898,3 @@ private const val GOAL_STATUS_BLOCKED = "blocked"
 private val GOAL_STATUS_REGEX = Regex("""<goal_status>\s*([A-Za-z]+)\s*</goal_status>""")
 
 
-private class TurnUsageTotals {
-    private var steps: Int = 0
-    private var llmMs: Long = 0L
-    private var toolMs: Long = 0L
-    private var ttftMs: Long = 0L
-    private var ttftSteps: Int = 0
-    private var decodeMs: Long = 0L
-    private var decodeTokens: Int = 0
-    private var contextTokens: Int? = null
-    private var inputTokens: Int? = null
-    private var outputTokens: Int? = null
-    private var reasoningTokens: Int? = null
-    private var cachedTokens: Int? = null
-
-    fun addToolDuration(durationMs: Long) {
-        if (durationMs > 0L) toolMs += durationMs
-    }
-
-    fun recordStep(
-        llmMs: Long,
-        ttftMs: Long?,
-        decodeMs: Long?,
-        usage: AgentTokenUsage?,
-        contextInputTokens: Int?,
-    ): AgentTokenUsage {
-        steps += 1
-        this.llmMs += llmMs.coerceAtLeast(0L)
-        if (ttftMs != null) {
-            this.ttftMs += ttftMs.coerceAtLeast(0L)
-            this.ttftSteps += 1
-        }
-        val out = usage?.outputTokens
-        if (decodeMs != null && out != null && out > 0) {
-            this.decodeMs += decodeMs.coerceAtLeast(0L)
-            this.decodeTokens += out
-        }
-        usage?.contextTokens?.let { this.contextTokens = it }
-        val stepInput = contextInputTokens ?: usage?.inputTokens
-        if (stepInput != null) {
-            this.inputTokens = (this.inputTokens ?: 0) + stepInput
-        }
-        usage?.outputTokens?.let {
-            this.outputTokens = (this.outputTokens ?: 0) + it
-        }
-        usage?.reasoningTokens?.let {
-            this.reasoningTokens = (this.reasoningTokens ?: 0) + it
-        }
-        usage?.cachedTokens?.let {
-            this.cachedTokens = (this.cachedTokens ?: 0) + it
-        }
-        return AgentTokenUsage(
-            contextTokens = this.contextTokens,
-            inputTokens = this.inputTokens,
-            outputTokens = this.outputTokens,
-            reasoningTokens = this.reasoningTokens,
-            cachedTokens = this.cachedTokens,
-            stepCount = steps.takeIf { it > 0 },
-            llmMs = this.llmMs.takeIf { steps > 0 },
-            toolMs = this.toolMs.takeIf { it > 0L },
-            ttftMs = this.ttftMs.takeIf { this.ttftSteps > 0 },
-            ttftSteps = this.ttftSteps.takeIf { it > 0 },
-            decodeMs = this.decodeMs.takeIf { this.decodeTokens > 0 && it > 0L },
-            decodeTokens = this.decodeTokens.takeIf { this.decodeMs > 0L && it > 0 },
-        )
-    }
-
-    fun reset() {
-        steps = 0
-        llmMs = 0L
-        toolMs = 0L
-        ttftMs = 0L
-        ttftSteps = 0
-        decodeMs = 0L
-        decodeTokens = 0
-        contextTokens = null
-        inputTokens = null
-        outputTokens = null
-        reasoningTokens = null
-        cachedTokens = null
-    }
-}

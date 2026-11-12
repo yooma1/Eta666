@@ -40,6 +40,8 @@
   <string name="action_continue">Continue</string>
   <string name="action_stop">Stop</string>
   <string name="action_edit">Edit</string>
+  <string name="action_pin_conversation">Pin</string>
+  <string name="action_unpin_conversation">Unpin</string>
   <string name="action_rename">Rename</string>
   <string name="action_export">Export</string>
   <string name="action_done">Done</string>
@@ -150,6 +152,9 @@
   <string name="appearance_title">Appearance &amp; Theme</string>
   <string name="appearance_group_color">Colors &amp; Theme</string>
   <string name="appearance_group_interface">Interface &amp; Effects</string>
+  <string name="appearance_ui_style">UI style</string>
+  <string name="appearance_ui_style_coui">COUI</string>
+  <string name="appearance_ui_style_miuix">Miuix</string>
   <string name="appearance_theme_mode">Theme mode</string>
   <string name="appearance_theme_system">Follow system</string>
   <string name="appearance_theme_light">Light</string>
@@ -1415,6 +1420,9 @@
   <string name="chat_image_preview">View image</string>
   <string name="chat_image_close">Close image</string>
   <string name="chat_image_more">%1$d more</string>
+  <string name="chat_view_image">View image</string>
+  <string name="reasoning_chip_off">Think</string>
+  <string name="reasoning_chip_default">Deep Think</string>
   <string name="chat_edit_preserve_following">Saving updates this message in place and keeps the rest of the conversation</string>
   <string name="chat_save_message">Save message</string>
   <string name="chat_character_story_start">The story begins here</string>
@@ -1590,4 +1598,8 @@
   <string name="ui_borrow_vendor_assistant_model">借用小布模型</string>
   <string name="ui_borrow_vendor_assistant_model_summary">把小布当成模型用：提问投进小布，回答旁路回来。需要 LSPosed 命中小布。</string>
   <string name="ui_vendor_assistant_exclusive_summary">另一项正在接管厂商助手，先把它关掉。</string>
+  <string name="conversation_branch">Branch into a new conversation</string>
+  <string name="conversation_branch_title">%1$s · Branch</string>
+  <string name="conversation_branch_unavailable">Cannot branch here: only turns with complete context and finished tool calls are supported.</string>
+  <string name="conversation_branch_failed">Could not create a branch. The original conversation has been kept. Please try again.</string>
 </resources>

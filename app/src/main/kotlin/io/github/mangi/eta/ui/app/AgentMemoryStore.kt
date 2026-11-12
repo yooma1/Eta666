@@ -39,11 +39,15 @@ internal class AgentMemoryStore(
 ) {
     private val appContext = context.applicationContext
 
+    private var hasLoadedOnce = false
+
     var memoryState by mutableStateOf(AgentMemoryUiState())
         private set
 
     fun refreshMemory() {
-        memoryState = memoryState.copy(isLoading = true, notice = null)
+        if (!hasLoadedOnce) {
+            memoryState = memoryState.copy(isLoading = true, notice = null)
+        }
         scope.launch(Dispatchers.IO) {
             runCatching {
                 val snapshot = AgentMemoryRepository.snapshot()
@@ -82,6 +86,10 @@ internal class AgentMemoryStore(
                         EtaWebDavSyncRepository.remoteConflictContent()
                     } else null
                     withContext(Dispatchers.Main) {
+                        val keepDraft = hasLoadedOnce && memoryState.hasUnsavedChanges
+                        val nextDraft = if (keepDraft) memoryState.draft else snapshot.content
+                        val nextBytes = if (keepDraft) memoryState.draftBytes else snapshot.byteSize
+                        hasLoadedOnce = true
                         memoryState = AgentMemoryUiState(
                             enabled = enabled,
                             autoExperienceEnabled = autoExperienceEnabled,
@@ -104,10 +112,11 @@ internal class AgentMemoryStore(
                             syncMemoryConflict = memoryConflict,
                             syncRemoteConflictContent = remoteConflictContent,
                             isLoading = false,
-                            draft = snapshot.content,
+                            draft = nextDraft,
                             savedContent = snapshot.content,
-                            draftBytes = snapshot.byteSize,
+                            draftBytes = nextBytes,
                             coreBudgetChars = coreBudget,
+                            notice = memoryState.notice,
                         )
                     }
                 },

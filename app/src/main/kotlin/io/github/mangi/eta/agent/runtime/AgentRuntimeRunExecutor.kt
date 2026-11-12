@@ -62,6 +62,7 @@ import io.github.mangi.eta.agent.tool.AgentToolCapabilities
 import io.github.mangi.eta.agent.tool.PendingSkillConflictCapabilityParser
 import io.github.mangi.eta.agent.tool.ToolExecutionDecision
 import io.github.mangi.eta.agent.voice.EtaAssistantOverlayService
+import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.datastore.SettingsDataStore
@@ -76,7 +77,6 @@ import io.github.mangi.eta.data.repository.AgentUserPromptResolver
 import io.github.mangi.eta.data.repository.AgentUserPromptSnapshot
 import io.github.mangi.eta.data.repository.ModelRepository
 import io.github.mangi.eta.data.repository.ProviderRepository
-import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import kotlinx.coroutines.CoroutineScope
@@ -530,7 +530,16 @@ internal class AgentRuntimeRunExecutor(
                 }
                 if (subagentAllowed()) AgentSubagentToolCatalog.appendSchemas(tools)
                 if (historyTool != null) tools.put(AgentConversationToolCatalog.schema())
-                if (characterMemoryTools != null && memoryEnabled) CharacterMemoryTools.appendSchemas(tools)
+                if (characterMemoryTools != null && memoryEnabled) {
+                    val temp = JSONArray().also(CharacterMemoryTools::appendSchemas)
+                    for (index in 0 until temp.length()) {
+                        val schema = temp.getJSONObject(index)
+                        val name = schema.getJSONObject("function").getString("name")
+                        if (Prefs.isToolEnabled(name)) {
+                            tools.put(schema)
+                        }
+                    }
+                }
                 if (taskTool != null) tools.put(taskTool.schema())
             }
             val runToolExecutor = AgentModelClient.ToolExecutor { call ->
@@ -539,7 +548,17 @@ internal class AgentRuntimeRunExecutor(
                 } else if (call.name == AgentConversationToolCatalog.READ_HISTORY && historyTool != null) {
                     historyTool.execute(call)
                 } else if (call.name in CharacterMemoryTools.NAMES && characterMemoryTools != null) {
-                    characterMemoryTools.execute(call)
+                    if (!Prefs.isToolEnabled(call.name)) {
+                        AgentModelClient.ToolResult(
+                            JSONObject()
+                                .put("ok", false)
+                                .put("code", "TOOL_DISABLED")
+                                .put("message", "工具 ${call.name} 已在工具列表中关闭，本次未执行")
+                                .toString(),
+                        )
+                    } else {
+                        characterMemoryTools.execute(call)
+                    }
                 } else if (call.name == AgentTaskTool.TASK_WRITE && taskTool != null) {
                     taskTool.execute(call)
                 } else if (call.name in AgentSubagentToolCatalog.names) {

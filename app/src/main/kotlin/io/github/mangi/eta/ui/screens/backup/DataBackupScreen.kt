@@ -5,40 +5,35 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Download
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.itos.coui.layout.Divider
+import com.itos.coui.layout.Group
+import com.itos.coui.text.CouiTextKind
+import com.itos.coui.text.Text as CouiText
 import io.github.mangi.eta.R
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.core.safeStackTrace
+import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.data.repository.EtaBackupOptions
 import io.github.mangi.eta.data.repository.EtaBackupSummary
-import io.github.mangi.eta.ui.components.EtaArrowPreference
-import io.github.mangi.eta.ui.components.EtaCard
-import io.github.mangi.eta.ui.components.EtaPreference
-import io.github.mangi.eta.ui.components.EtaPreferenceDefaults
-import io.github.mangi.eta.ui.components.EtaPreferenceDivider
-import io.github.mangi.eta.ui.components.EtaPreferenceGroup
-import io.github.mangi.eta.ui.components.EtaPreferenceGroupTitle
-import io.github.mangi.eta.ui.components.EtaSwitchPreference
-import io.github.mangi.eta.ui.components.EtaWindowDialog
+import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.MiuixScaffoldPage
+import io.github.mangi.eta.ui.components.coui.CouiConfirmDialog
+import io.github.mangi.eta.ui.components.coui.CouiPageBottomSpacer
+import io.github.mangi.eta.ui.components.coui.CouiPreference
+import io.github.mangi.eta.ui.components.coui.CouiSwitchPreference
+import io.github.mangi.eta.ui.components.coui.CouiScaffoldPage
 import java.io.InputStream
 import java.io.OutputStream
 import java.text.SimpleDateFormat
@@ -46,9 +41,13 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
-import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.window.WindowDialog
 
 @Composable
 internal fun DataBackupScreen(
@@ -61,13 +60,13 @@ internal fun DataBackupScreen(
     var busy by remember { mutableStateOf(false) }
     var includeMcpServers by remember { mutableStateOf(true) }
     var includeCustomSubagents by remember { mutableStateOf(true) }
-    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
-    var showImportDialog by remember { mutableStateOf(false) }
 
     fun currentOptions() = EtaBackupOptions(
         includeMcpServers = includeMcpServers,
         includeCustomSubagents = includeCustomSubagents,
     )
+    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
+    var showImportDialog by remember { mutableStateOf(false) }
 
     fun showFailure(throwable: Throwable) {
         if (throwable is CancellationException) throw throwable
@@ -121,160 +120,221 @@ internal fun DataBackupScreen(
         }
     }
 
-    MiuixScaffoldPage(
-        title = stringResource(R.string.data_backup_title),
-        onBack = onBack,
-    ) {
-        item(key = "warning") {
-            EtaPreferenceGroup(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                EtaPreference(
-                    title = stringResource(R.string.data_backup_warning_title),
-                    summary = stringResource(R.string.data_backup_warning_summary),
-                )
+    when (LocalUiStyle.current) {
+        AppearanceUiStyle.COUI -> {
+            CouiScaffoldPage(
+                title = stringResource(R.string.data_backup_title),
+                onBack = onBack,
+            ) {
+                Group {
+                    CouiPreference(
+                        title = stringResource(R.string.data_backup_warning_title),
+                        summary = stringResource(R.string.data_backup_warning_summary),
+                        showChevron = false,
+                    )
+                }
+                Group(title = "附加备份项（导出与导入生效）") {
+                    CouiSwitchPreference(
+                        title = "包含 MCP 服务器",
+                        summary = "备份与恢复已配置的 MCP 服务器、工具定义缓存及 Bearer 凭据",
+                        checked = includeMcpServers,
+                        enabled = !busy,
+                        onCheckedChange = { includeMcpServers = it },
+                    )
+                    Divider()
+                    CouiSwitchPreference(
+                        title = "包含自定义 Subagents",
+                        summary = "备份与恢复工作区 agents/*.md 自定义子智能体模板",
+                        checked = includeCustomSubagents,
+                        enabled = !busy,
+                        onCheckedChange = { includeCustomSubagents = it },
+                    )
+                }
+                Group(title = stringResource(R.string.data_backup_actions)) {
+                    CouiPreference(
+                        title = stringResource(R.string.data_backup_export),
+                        summary = if (busy) {
+                            stringResource(R.string.data_backup_working)
+                        } else {
+                            stringResource(R.string.data_backup_export_summary)
+                        },
+                        enabled = !busy,
+                        trailing = if (busy) {
+                            { InfiniteProgressIndicator(size = 20.dp) }
+                        } else {
+                            null
+                        },
+                        onClick = { exportLauncher.launch(defaultBackupFileName()) },
+                    )
+                    Divider()
+                    CouiPreference(
+                        title = stringResource(R.string.data_backup_import),
+                        summary = stringResource(R.string.data_backup_import_summary),
+                        enabled = !busy,
+                        onClick = {
+                            importLauncher.launch(arrayOf("application/json", "text/plain"))
+                        },
+                    )
+                }
+                CouiPageBottomSpacer()
             }
         }
-        item(key = "options-title") {
-            EtaPreferenceGroupTitle("附加备份项（导出与导入生效）")
-        }
-        item(key = "options-card") {
-            EtaPreferenceGroup(modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp)) {
-                EtaSwitchPreference(
-                    title = "包含 MCP 服务器",
-                    summary = "备份与恢复已配置的 MCP 服务器、工具定义缓存及 Bearer 凭据",
-                    checked = includeMcpServers,
-                    enabled = !busy,
-                    onCheckedChange = { includeMcpServers = it },
-                )
-                EtaPreferenceDivider()
-                EtaSwitchPreference(
-                    title = "包含自定义 Subagents",
-                    summary = "备份与恢复工作区 agents/*.md 自定义子智能体模板",
-                    checked = includeCustomSubagents,
-                    enabled = !busy,
-                    onCheckedChange = { includeCustomSubagents = it },
-                )
-            }
-        }
-        item(key = "actions-title") {
-            EtaPreferenceGroupTitle(stringResource(R.string.data_backup_actions))
-        }
-        item(key = "actions-card") {
-            EtaPreferenceGroup(modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
-                EtaArrowPreference(
-                    title = stringResource(R.string.data_backup_export),
-                    summary = if (busy) {
-                        stringResource(R.string.data_backup_working)
-                    } else {
-                        stringResource(R.string.data_backup_export_summary)
-                    },
-                    enabled = !busy,
-                    startAction = {
-                        BackupIcon(
-                            icon = Icons.Rounded.Download,
-                            loading = busy,
+
+        AppearanceUiStyle.MIUIX -> {
+            MiuixScaffoldPage(
+                title = stringResource(R.string.data_backup_title),
+                onBack = onBack,
+            ) {
+                item(key = "warning") {
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(top = 8.dp, bottom = 12.dp),
+                    ) {
+                        BasicComponent(
+                            title = stringResource(R.string.data_backup_warning_title),
+                            summary = stringResource(R.string.data_backup_warning_summary),
                         )
-                    },
-                    onClick = {
-                        exportLauncher.launch(defaultBackupFileName())
-                    },
-                )
-                EtaPreferenceDivider(hasLeading = true)
-                EtaArrowPreference(
-                    title = stringResource(R.string.data_backup_import),
-                    summary = stringResource(R.string.data_backup_import_summary),
-                    enabled = !busy,
-                    startAction = {
-                        BackupIcon(
-                            icon = Icons.Rounded.Description,
-                            loading = false,
+                    }
+                }
+                item(key = "options") {
+                    SmallTitle("附加备份项（导出与导入生效）")
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                    ) {
+                        SwitchPreference(
+                            title = "包含 MCP 服务器",
+                            summary = "备份与恢复已配置的 MCP 服务器、工具定义缓存及 Bearer 凭据",
+                            checked = includeMcpServers,
+                            enabled = !busy,
+                            onCheckedChange = { includeMcpServers = it },
                         )
-                    },
-                    onClick = {
-                        importLauncher.launch(arrayOf("application/json", "text/plain"))
-                    },
-                )
+                        SwitchPreference(
+                            title = "包含自定义 Subagents",
+                            summary = "备份与恢复工作区 agents/*.md 自定义子智能体模板",
+                            checked = includeCustomSubagents,
+                            enabled = !busy,
+                            onCheckedChange = { includeCustomSubagents = it },
+                        )
+                    }
+                }
+                item(key = "actions") {
+                    SmallTitle(stringResource(R.string.data_backup_actions))
+                    Card(
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 12.dp),
+                    ) {
+                        ArrowPreference(
+                            title = stringResource(R.string.data_backup_export),
+                            summary = if (busy) {
+                                stringResource(R.string.data_backup_working)
+                            } else {
+                                stringResource(R.string.data_backup_export_summary)
+                            },
+                            enabled = !busy,
+                            endActions = {
+                                if (busy) {
+                                    InfiniteProgressIndicator(size = 20.dp)
+                                }
+                            },
+                            onClick = {
+                                exportLauncher.launch(defaultBackupFileName())
+                            },
+                        )
+                        ArrowPreference(
+                            title = stringResource(R.string.data_backup_import),
+                            summary = stringResource(R.string.data_backup_import_summary),
+                            enabled = !busy,
+                            onClick = {
+                                importLauncher.launch(arrayOf("application/json", "text/plain"))
+                            },
+                        )
+                    }
+                }
             }
         }
     }
 
     if (showImportDialog) {
-        EtaWindowDialog(
-            show = true,
-            title = stringResource(R.string.data_backup_import_confirm_title),
-            summary = stringResource(R.string.data_backup_import_confirm_summary),
-            onDismissRequest = {
-                if (!busy) {
-                    showImportDialog = false
-                    pendingImportUri = null
-                }
-            },
-        ) {
-            MiuixDialogActions(
-                confirmText = if (busy) {
-                    stringResource(R.string.data_backup_working)
-                } else {
-                    stringResource(R.string.action_import)
-                },
-                destructive = true,
-                cancelEnabled = !busy,
-                confirmEnabled = !busy,
-                onCancel = {
-                    showImportDialog = false
-                    pendingImportUri = null
-                },
-                onConfirm = {
-                    val uri = pendingImportUri ?: return@MiuixDialogActions
-                    val options = currentOptions()
-                    showImportDialog = false
-                    scope.launch {
-                        busy = true
-                        try {
-                            val input = context.contentResolver.openInputStream(uri)
-                                ?: error(context.getString(R.string.data_backup_file_open_failed))
-                            val summary = input.use { onImport(it, options) }
-                            val extra = buildList {
-                                if (options.includeMcpServers && summary.mcpServerCount > 0) add("MCP ${summary.mcpServerCount}")
-                                if (options.includeCustomSubagents && summary.customSubagentCount > 0) add("Subagent ${summary.customSubagentCount}")
-                            }.joinToString(" · ")
-                            val baseToast = context.getString(
-                                R.string.data_backup_imported,
-                                summary.conversationCount,
-                                summary.providerCount,
-                            )
-                            Toast.makeText(
-                                context,
-                                if (extra.isEmpty()) baseToast else "$baseToast ($extra)",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        } catch (throwable: Throwable) {
-                            showFailure(throwable)
-                        } finally {
-                            pendingImportUri = null
-                            busy = false
-                        }
-                    }
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun BackupIcon(icon: ImageVector, loading: Boolean) {
-    Box(
-        // 与 EtaPreferenceIcon 同宽，正文和分割线起点保持对齐。
-        modifier = Modifier.size(EtaPreferenceDefaults.IconSize),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (loading) {
-            InfiniteProgressIndicator(size = 20.dp)
+        val confirmText = if (busy) {
+            stringResource(R.string.data_backup_working)
         } else {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(24.dp),
-                tint = MiuixTheme.colorScheme.onBackground,
-            )
+            stringResource(R.string.action_import)
+        }
+        val onDismissImport: () -> Unit = {
+            if (!busy) {
+                showImportDialog = false
+                pendingImportUri = null
+            }
+        }
+        val onConfirmImport: () -> Unit = {
+            val uri = pendingImportUri
+            if (uri != null) {
+                showImportDialog = false
+                scope.launch {
+                    busy = true
+                    try {
+                        val options = currentOptions()
+                        val input = context.contentResolver.openInputStream(uri)
+                            ?: error(context.getString(R.string.data_backup_file_open_failed))
+                        val summary = input.use { onImport(it, options) }
+                        val extra = buildList {
+                            if (options.includeMcpServers && summary.mcpServerCount > 0) add("MCP ${summary.mcpServerCount}")
+                            if (options.includeCustomSubagents && summary.customSubagentCount > 0) add("Subagent ${summary.customSubagentCount}")
+                        }.joinToString(" · ")
+                        val baseToast = context.getString(
+                            R.string.data_backup_imported,
+                            summary.conversationCount,
+                            summary.providerCount,
+                        )
+                        Toast.makeText(
+                            context,
+                            if (extra.isEmpty()) baseToast else "$baseToast ($extra)",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    } catch (throwable: Throwable) {
+                        showFailure(throwable)
+                    } finally {
+                        pendingImportUri = null
+                        busy = false
+                    }
+                }
+            }
+        }
+        when (LocalUiStyle.current) {
+            AppearanceUiStyle.COUI -> {
+                CouiConfirmDialog(
+                    visible = true,
+                    title = stringResource(R.string.data_backup_import_confirm_title),
+                    message = stringResource(R.string.data_backup_import_confirm_summary),
+                    confirmText = confirmText,
+                    confirmEnabled = !busy,
+                    cancelEnabled = !busy,
+                    destructive = true,
+                    onConfirm = onConfirmImport,
+                    onDismissRequest = onDismissImport,
+                )
+            }
+            AppearanceUiStyle.MIUIX -> {
+                WindowDialog(
+                    show = true,
+                    title = stringResource(R.string.data_backup_import_confirm_title),
+                    summary = stringResource(R.string.data_backup_import_confirm_summary),
+                    onDismissRequest = onDismissImport,
+                ) {
+                    MiuixDialogActions(
+                        confirmText = confirmText,
+                        destructive = true,
+                        cancelEnabled = !busy,
+                        confirmEnabled = !busy,
+                        onCancel = onDismissImport,
+                        onConfirm = onConfirmImport,
+                    )
+                }
+            }
         }
     }
 }

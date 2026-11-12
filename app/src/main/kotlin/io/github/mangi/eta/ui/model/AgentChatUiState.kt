@@ -24,6 +24,7 @@ internal data class AgentChatUiState(
     val pendingFileReferences: List<PendingFileReferenceUi> = emptyList(),
     val queuedMessages: List<QueuedMessageUi> = emptyList(),
     val inputSyncVersion: Int = 0,
+    val focusInputOnSync: Boolean = true,
     val appliedRuntimeRunIds: List<String> = emptyList(),
     val messageEdit: MessageEditUiState? = null,
     val roleplay: RoleplayBinding? = null,
@@ -179,6 +180,12 @@ data class TokenUsageUi(
             ttftSteps == null &&
             decodeMs == null &&
             decodeTokens == null
+
+    val hasPerformanceStats: Boolean
+        get() = (llmMs != null && llmMs > 0L) ||
+            (toolMs != null && toolMs > 0L) ||
+            (ttftMs != null && (ttftSteps ?: 1) > 0) ||
+            (decodeMs != null && decodeMs > 0L && (decodeTokens ?: outputTokens ?: 0) > 0)
 }
 
 @Immutable

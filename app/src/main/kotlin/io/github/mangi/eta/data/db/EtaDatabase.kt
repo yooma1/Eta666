@@ -125,17 +125,48 @@ internal abstract class EtaDatabase : RoomDatabase() {
         }
 
         internal val MIGRATION_23_24 = Migration(23, 24) { database ->
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN step_count INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN llm_ms INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN tool_ms INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN ttft_ms INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN ttft_steps INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_ms INTEGER")
-            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_tokens INTEGER")
+            database.execSQL("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
+            ensureMessageStatsColumns(database)
         }
 
         internal val MIGRATION_24_25 = Migration(24, 25) { database ->
+            ensureConversationPinnedColumn(database)
+            ensureMessageStatsColumns(database)
             createConversationCategorySchema(database)
+        }
+
+        private fun ensureConversationPinnedColumn(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            val hasPinned = database.query("PRAGMA table_info(conversations)").use { cursor ->
+                val nameIndex = cursor.getColumnIndex("name")
+                var found = false
+                while (cursor.moveToNext()) {
+                    if (nameIndex >= 0 && cursor.getString(nameIndex) == "is_pinned") {
+                        found = true
+                        break
+                    }
+                }
+                found
+            }
+            if (!hasPinned) {
+                database.execSQL("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private fun ensureMessageStatsColumns(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            val existing = mutableSetOf<String>()
+            database.query("PRAGMA table_info(conversation_messages)").use { cursor ->
+                val nameIndex = cursor.getColumnIndex("name")
+                while (cursor.moveToNext()) {
+                    if (nameIndex >= 0) cursor.getString(nameIndex)?.let(existing::add)
+                }
+            }
+            listOf(
+                "step_count", "llm_ms", "tool_ms", "ttft_ms", "ttft_steps", "decode_ms", "decode_tokens"
+            ).forEach { col ->
+                if (col !in existing) {
+                    database.execSQL("ALTER TABLE conversation_messages ADD COLUMN $col INTEGER")
+                }
+            }
         }
 
         internal fun createConversationCategorySchema(database: androidx.sqlite.db.SupportSQLiteDatabase) {
@@ -155,6 +186,20 @@ internal abstract class EtaDatabase : RoomDatabase() {
                 ).use { database ->
                     val version = database.version
                     if (version < DATABASE_VERSION_WITH_CATEGORIES) return@use
+                    val hasPinned = database.rawQuery("PRAGMA table_info(conversations)", null).use { cursor ->
+                        val nameIndex = cursor.getColumnIndex("name")
+                        var found = false
+                        while (cursor.moveToNext()) {
+                            if (nameIndex >= 0 && cursor.getString(nameIndex) == "is_pinned") {
+                                found = true
+                                break
+                            }
+                        }
+                        found
+                    }
+                    if (!hasPinned) {
+                        database.execSQL("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
+                    }
                     val tables = mutableSetOf<String>()
                     database.rawQuery(
                         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN " +
@@ -169,16 +214,10 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         database.execSQL(CREATE_CATEGORY_MEMBERS_INDEX)
                     }
                     if (version < 25) database.version = 25
-                    database.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
-                    database.execSQL(
-                        "INSERT OR REPLACE INTO room_master_table (id,identity_hash) " +
-                            "VALUES(42, '$SCHEMA_25_IDENTITY_HASH')",
-                    )
                 }
             }
         }
 
-        private const val SCHEMA_25_IDENTITY_HASH = "6d9ae2c7a2f9fee84da7f0d6c89fab8d"
         private const val DATABASE_VERSION_WITH_CATEGORIES = 24
 
         private const val CREATE_CATEGORIES =
@@ -194,7 +233,6 @@ internal abstract class EtaDatabase : RoomDatabase() {
         private const val CREATE_CATEGORY_MEMBERS_INDEX =
             "CREATE INDEX IF NOT EXISTS `idx_conv_category_members_category` " +
                 "ON `conversation_category_members` (`category_id`)"
-
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {
             mapOf("runtime_results" to "run_id", "runtime_archive_runs" to "archive_run_id",
                 "runtime_inflight_runs" to "run_id", "conversation_context_checkpoints" to "conversation_id",

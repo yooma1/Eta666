@@ -1106,8 +1106,18 @@ internal object AgentRuntimeWire {
     private fun Bundle.optionalInt(key: String): Int? =
         if (containsKey(key)) getInt(key) else null
 
+    @Suppress("DEPRECATION")
     private fun Bundle.optionalLong(key: String): Long? =
-        if (containsKey(key)) getLong(key) else null
+        if (!containsKey(key)) {
+            null
+        } else {
+            when (val raw = get(key)) {
+                is Long -> raw
+                is Int -> raw.toLong()
+                is Number -> raw.toLong()
+                else -> null
+            }
+        }
 
     private fun Bundle.putTokenUsage(usage: AgentTokenUsage) {
         usage.contextTokens?.let { putInt("usage_context", it) }

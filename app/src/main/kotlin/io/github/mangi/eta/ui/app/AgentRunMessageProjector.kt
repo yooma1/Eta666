@@ -111,16 +111,14 @@ internal class AgentRunMessageProjector(
             message is AgentMessageUi && isAssistantMessageForRound(message.id, runId, round)
         }
         if (targetIndex < 0) return messages
-        val turnBoundary = messages.indexOfLast { message ->
+        val turnStartIndex = messages.indexOfLast { message ->
             message is UserMessageUi ||
-                (message is SystemNoticeMessageUi &&
-                    message.code == SystemNoticeCode.ModelRetry &&
-                    message.id.startsWith("assistant-$runId-retry-"))
+                (message is SystemNoticeMessageUi && message.code == SystemNoticeCode.ModelRetry && message.id.startsWith("assistant-$runId-retry-"))
         }
         return messages.mapIndexed { index, message ->
             when {
                 index == targetIndex && message is AgentMessageUi -> message.copy(usage = usage)
-                index in (turnBoundary + 1) until targetIndex &&
+                index > turnStartIndex && index < targetIndex &&
                     message is AgentMessageUi &&
                     isAssistantMessageForRun(message.id, runId) &&
                     message.usage != null -> message.copy(usage = null)

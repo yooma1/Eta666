@@ -41,10 +41,9 @@ fun MiuixScaffoldPage(
     compactTitle: Boolean = false,
     content: LazyListScope.() -> Unit,
 ) {
-    EtaPreferenceTheme {
-        val scrollBehavior = MiuixScrollBehavior()
-        val backdrop = rememberTopBarBackdrop()
-        val topBarColor = topBarContainerColor(backdrop)
+    val scrollBehavior = MiuixScrollBehavior()
+    val backdrop = rememberTopBarBackdrop()
+    val topBarColor = topBarContainerColor(backdrop)
 
         Scaffold(
             modifier = modifier.fillMaxSize(),
@@ -97,7 +96,6 @@ fun MiuixScaffoldPage(
             }
             overlay()
         }
-    }
 }
 
 /**
@@ -116,29 +114,27 @@ fun MiuixScaffold(
         sidePadding: Dp,
     ) -> Unit,
 ) {
-    EtaPreferenceTheme {
-        val scrollBehavior = MiuixScrollBehavior()
-        val backdrop = rememberTopBarBackdrop()
-        val topBarColor = topBarContainerColor(backdrop)
+    val scrollBehavior = MiuixScrollBehavior()
+    val backdrop = rememberTopBarBackdrop()
+    val topBarColor = topBarContainerColor(backdrop)
 
-        Scaffold(
-            modifier = modifier.fillMaxSize(),
-            topBar = {
-                TopBarBackdrop(backdrop) {
-                    AdaptiveTopAppBar(
-                        title = title,
-                        color = topBarColor,
-                        navigationIcon = { MiuixBackButton(onClick = onBack) },
-                        actions = actions,
-                        scrollBehavior = scrollBehavior,
-                    )
-                }
-            },
-        ) { paddingValues ->
-            Box(modifier = Modifier.fillMaxSize().captureForTopBar(backdrop)) {
-                WidePageContent { sidePadding ->
-                    content(paddingValues, scrollBehavior, sidePadding)
-                }
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        topBar = {
+            TopBarBackdrop(backdrop) {
+                AdaptiveTopAppBar(
+                    title = title,
+                    color = topBarColor,
+                    navigationIcon = { MiuixBackButton(onClick = onBack) },
+                    actions = actions,
+                    scrollBehavior = scrollBehavior,
+                )
+            }
+        },
+    ) { paddingValues ->
+        Box(modifier = Modifier.fillMaxSize().captureForTopBar(backdrop)) {
+            WidePageContent { sidePadding ->
+                content(paddingValues, scrollBehavior, sidePadding)
             }
         }
     }

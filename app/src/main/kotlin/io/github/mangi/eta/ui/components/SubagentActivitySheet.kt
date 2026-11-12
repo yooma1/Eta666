@@ -44,10 +44,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
 import io.github.mangi.eta.agent.subagent.SubagentRunRegistry
 import kotlinx.coroutines.delay
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
+import com.itos.coui.dialog.CouiDialogAction
+import com.itos.coui.dialog.CouiDialogDefaults
+import com.itos.coui.dialog.CouiDialogPlacement
+import com.itos.coui.dialog.Dialog
+import com.itos.coui.menu.rememberCouiWindowBackdrop
+import com.itos.coui.theme.CouiTheme
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.subagent.SubagentActivitySnapshot
 import io.github.mangi.eta.agent.subagent.SubagentStepSnapshot
+import io.github.mangi.eta.data.model.AppearanceUiStyle
+import io.github.mangi.eta.ui.app.LocalUiStyle
+import io.github.mangi.eta.ui.components.coui.rememberCouiDialogMaterial
 import io.github.mangi.eta.ui.model.ToolActivityMessageUi
 import io.github.mangi.eta.ui.model.ToolActivityStatusUi
 import top.yukonga.miuix.kmp.basic.Icon
@@ -144,16 +154,42 @@ internal fun SubagentActivityRow(
         }
     }
 
-    OverlayBottomSheet(
-        show = showInspector,
-        title = taskTitle,
-        onDismissRequest = { showInspector = false },
-    ) {
-        SubagentInspectorContent(
-            snapshot = snapshot,
-            running = running,
-            failed = failed,
-        )
+    when (LocalUiStyle.current) {
+        AppearanceUiStyle.COUI -> {
+            val dark = CouiTheme.isDark
+            Dialog(
+                visible = showInspector,
+                onDismissRequest = { showInspector = false },
+                dark = dark,
+                title = taskTitle,
+                confirmAction = CouiDialogAction(
+                    text = stringResource(R.string.action_close),
+                    onClick = { showInspector = false },
+                ),
+                placement = CouiDialogPlacement.Bottom,
+                material = rememberCouiDialogMaterial(dark),
+                backdrop = rememberCouiWindowBackdrop(),
+            ) {
+                SubagentInspectorContent(
+                    snapshot = snapshot,
+                    running = running,
+                    failed = failed,
+                )
+            }
+        }
+        AppearanceUiStyle.MIUIX -> {
+            OverlayBottomSheet(
+                show = showInspector,
+                title = taskTitle,
+                onDismissRequest = { showInspector = false },
+            ) {
+                SubagentInspectorContent(
+                    snapshot = snapshot,
+                    running = running,
+                    failed = failed,
+                )
+            }
+        }
     }
 }
 
@@ -201,14 +237,22 @@ private fun SubagentInspectorContent(
     val maxSheetHeight = with(density) { LocalWindowInfo.current.containerSize.height.toDp() } * 0.76f
     var promptExpanded by rememberSaveable(snapshot.subagentId) { mutableStateOf(false) }
     val pulse = rememberDrawPhasePulse(active = running)
+    val isCoui = LocalUiStyle.current == AppearanceUiStyle.COUI
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = maxSheetHeight)
-            .verticalScroll(rememberScrollState())
-            .navigationBarsPadding()
-            .padding(bottom = 24.dp),
+            .then(
+                if (isCoui) {
+                    Modifier.padding(horizontal = CouiDialogDefaults.contentPadding, vertical = 8.dp)
+                } else {
+                    Modifier
+                        .heightIn(max = maxSheetHeight)
+                        .verticalScroll(rememberScrollState())
+                        .navigationBarsPadding()
+                        .padding(bottom = 24.dp)
+                },
+            ),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // 顶部状态与元信息横条：留白克制，只展示关键身份与实时状态
@@ -281,7 +325,7 @@ private fun SubagentInspectorContent(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    EtaTextButton(
+                    TextButton(
                         text = if (paused) "继续执行" else "暂停",
                         onClick = {
                             val ok = if (paused) {
@@ -332,7 +376,7 @@ private fun SubagentInspectorContent(
                         singleLine = true,
                         modifier = Modifier.weight(1f),
                     )
-                    EtaTextButton(
+                    TextButton(
                         text = "发送",
                         enabled = steerText.isNotBlank(),
                         onClick = {

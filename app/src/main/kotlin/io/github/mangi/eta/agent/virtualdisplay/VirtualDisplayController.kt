@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.hardware.display.DisplayManager
@@ -24,6 +25,7 @@ import android.view.Display
 import android.view.WindowManager
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.scale
+import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
 import io.github.mangi.eta.agent.device.DeviceToolContract
@@ -33,9 +35,6 @@ import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.R
 import io.github.mangi.eta.ui.MainActivity
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -57,6 +56,8 @@ import org.lsposed.hiddenapibypass.HiddenApiBypass
 internal object VirtualDisplayController {
 
     private val lock = Any()
+    private val creationLock = Any()
+    private val sessionState = VirtualDisplaySessionState()
     private val mutableSnapshots = MutableStateFlow(VirtualDisplaySnapshot.Inactive)
     val snapshots: StateFlow<VirtualDisplaySnapshot> = mutableSnapshots.asStateFlow()
 
@@ -66,17 +67,7 @@ internal object VirtualDisplayController {
     @Volatile
     private var highFrequencyPreview: Boolean = false
 
-    private var frameThread: HandlerThread? = null
-    private var frameHandler: Handler? = null
-    private var imageReader: ImageReader? = null
-    private var inProcessVirtualDisplay: VirtualDisplay? = null
-    private var rootBridgeProcess: Process? = null
-    private var processSupervisor: ShellProcessSupervisor? = null
-
-    private var activeDisplayId: Int = Display.DEFAULT_DISPLAY
-    private var displayWidth: Int = 1080
-    private var displayHeight: Int = 2400
-    private var displayDensityDpi: Int = 420
+    private var displayResources: VirtualDisplaySessionResources? = null
     private var latestFullBitmap: Bitmap? = null
     private var lastUiFrameAtElapsedMs: Long = 0L
     private val mutedPackages = linkedSetOf<String>()
@@ -92,7 +83,7 @@ internal object VirtualDisplayController {
     private var lastAppContext: Context? = null
 
     fun isBackendAvailable(rootAvailable: Boolean, lsposedAvailable: Boolean): Boolean =
-        rootAvailable || lsposedAvailable
+        CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT) && (rootAvailable || lsposedAvailable)
 
     fun setStageExpanded(expanded: Boolean) {
         highFrequencyPreview = expanded
@@ -108,7 +99,7 @@ internal object VirtualDisplayController {
     }
 
     fun currentDisplayId(): Int = synchronized(lock) {
-        activeDisplayId.takeIf { CanvasRoutingPolicy.isVirtualDisplay(it) } ?: Display.DEFAULT_DISPLAY
+        sessionState.active?.displayId ?: Display.DEFAULT_DISPLAY
     }
 
     /**
@@ -118,81 +109,103 @@ internal object VirtualDisplayController {
         context: Context,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
     ): Int? {
-        synchronized(lock) {
-            if (CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId) && imageReader != null) {
-                return activeDisplayId
-            }
-        }
+        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT)) return null
         val appContext = context.applicationContext
         lastAppContext = appContext
-        val (width, height, densityDpi) = resolvePhysicalDisplayMetrics(appContext)
-        synchronized(lock) {
-            if (CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId) && imageReader != null) {
-                return activeDisplayId
+        val manager = appContext.getSystemService(DisplayManager::class.java) ?: return null
+        // 创建可包含 Binder 与 Root 等待；发布状态和释放不等待这把创建锁。
+        synchronized(creationLock) {
+            val existing = synchronized(lock) { sessionState.active }
+            if (existing != null) {
+                val bridge = synchronized(lock) { displayResources?.bridge }
+                if ((bridge == null || bridge.isAlive) && isDisplayUsable(manager, existing.displayId)) {
+                    synchronized(lock) {
+                        if (sessionState.isCurrent(existing.token)) return existing.displayId
+                    }
+                }
+                releaseSession(appContext, rootAvailable, existing.token)
             }
-            releaseLocked(appContext, rootAvailable)
-
-            val thread = HandlerThread("eta-virtual-display-frame").apply { start() }
-            val handler = Handler(thread.looper)
-            val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
-            reader.setOnImageAvailableListener(::onFrameAvailable, handler)
-
-            frameThread = thread
-            frameHandler = handler
-            imageReader = reader
-            displayWidth = width
-            displayHeight = height
-            displayDensityDpi = densityDpi
-
-            val createdInProcess = tryCreateInProcessVirtualDisplay(
-                appContext = appContext,
-                surface = reader.surface,
-                width = width,
-                height = height,
-                densityDpi = densityDpi,
-            )
-            if (createdInProcess != null) {
-                val id = createdInProcess.display?.displayId ?: Display.INVALID_DISPLAY
-                if (CanvasRoutingPolicy.isVirtualDisplay(id)) {
-                    inProcessVirtualDisplay = createdInProcess
-                    activeDisplayId = id
+            val token = synchronized(lock) { sessionState.begin() }
+            val frameWorker = HandlerThread("eta-virtual-display-frame")
+            var reader: ImageReader? = null
+            var inProcessDisplay: VirtualDisplay? = null
+            var rootBridge: RootVirtualDisplayBridge? = null
+            var listener: DisplayManager.DisplayListener? = null
+            var accepted = false
+            try {
+                val (width, height, densityDpi) = resolvePhysicalDisplayMetrics(appContext)
+                frameWorker.start()
+                val frames = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+                reader = frames
+                val handler = Handler(frameWorker.looper)
+                frames.setOnImageAvailableListener(::onFrameAvailable, handler)
+                if (rootAvailable()) {
+                    rootBridge = RootVirtualDisplayBridge.create(
+                        appContext, frames.surface, width, height, densityDpi, rootAvailable,
+                    ) { process ->
+                        val ownsSession = synchronized(lock) {
+                            sessionState.isCurrent(token) && displayResources?.bridge?.process === process
+                        }
+                        if (ownsSession) releaseSession(appContext, rootAvailable, token)
+                    }
+                }
+                val id = rootBridge?.displayId ?: run {
+                    if (EtaApp.serviceInstance == null) return null
+                    inProcessDisplay = tryCreateInProcessVirtualDisplay(
+                        appContext, frames.surface, width, height, densityDpi,
+                    )
+                    inProcessDisplay?.display?.displayId ?: return null
+                }
+                listener = object : DisplayManager.DisplayListener {
+                    override fun onDisplayAdded(displayId: Int) = Unit
+                    override fun onDisplayChanged(displayId: Int) {
+                        if (displayId == id && !isDisplayUsable(manager, id)) {
+                            releaseSession(appContext, rootAvailable, token)
+                        }
+                    }
+                    override fun onDisplayRemoved(displayId: Int) {
+                        if (displayId == id) releaseSession(appContext, rootAvailable, token)
+                    }
+                }
+                manager.registerDisplayListener(listener, handler)
+                if (!isDisplayUsable(manager, id)) return null
+                synchronized(lock) {
+                    if (rootBridge?.isAlive == false || !sessionState.activate(token, id)) return null
+                    displayResources = VirtualDisplaySessionResources(
+                        frames, frameWorker, inProcessDisplay, rootBridge, manager, listener,
+                    )
                     mutableSnapshots.value = VirtualDisplaySnapshot(
                         active = true,
                         displayId = id,
                         width = width,
                         height = height,
                     )
-                    AndroidAgentLogger.info("Virtual display created in-process: displayId=$id size=${width}x$height")
-                    return id
+                    accepted = true
                 }
-                runCatching { createdInProcess.release() }
-            }
-
-            if (rootAvailable()) {
-                val rootId = tryCreateRootBridgedVirtualDisplay(
-                    appContext = appContext,
-                    surface = reader.surface,
-                    width = width,
-                    height = height,
-                    densityDpi = densityDpi,
-                    rootAvailable = rootAvailable,
-                )
-                if (rootId != null && CanvasRoutingPolicy.isVirtualDisplay(rootId)) {
-                    activeDisplayId = rootId
-                    mutableSnapshots.value = VirtualDisplaySnapshot(
-                        active = true,
-                        displayId = rootId,
-                        width = width,
-                        height = height,
-                    )
-                    AndroidAgentLogger.info("Virtual display created via root bridge: displayId=$rootId size=${width}x$height")
-                    return rootId
+                AndroidAgentLogger.info("Virtual display ready: displayId=$id size=${width}x$height")
+                return id
+            } catch (exception: Exception) {
+                AndroidAgentLogger.warn("Virtual display creation failed: type=${exception.safeLogType()}")
+                return null
+            } finally {
+                if (!accepted) {
+                    synchronized(lock) { sessionState.invalidate(token) }
+                    VirtualDisplaySessionResources(
+                        reader, frameWorker, inProcessDisplay, rootBridge, manager, listener,
+                    ).close()
                 }
             }
-
-            releaseLocked(appContext, rootAvailable)
-            return null
         }
+    }
+
+    private fun isDisplayUsable(manager: DisplayManager, displayId: Int): Boolean = try {
+        val display = manager.getDisplay(displayId)
+        display != null && display.isValid && CanvasRoutingPolicy.hasRequiredDisplayFlags(display.flags)
+    } catch (exception: Exception) {
+        AndroidAgentLogger.warnThrottled("virtual_display_validation_failed") {
+            "Virtual display validation failed: type=${exception.safeLogType()}"
+        }
+        false
     }
 
     /**
@@ -204,49 +217,47 @@ internal object VirtualDisplayController {
         appName: String,
         launchIntent: Intent,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
+        checkCancellation: () -> Unit = {},
     ): Int? {
+        checkCancellation()
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
+        checkCancellation()
         val appContext = context.applicationContext
         // 采样必须在启动之前：一旦任务被迁到虚拟屏，主屏顶层就变成 Eta 自己了。
         captureMainDisplayScene(packageName, rootAvailable)
         mutePackageAudioFocusIfPossible(appContext, packageName, rootAvailable)
 
-        val startedInProcess = runCatching {
-            val intent = Intent(launchIntent).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        var launchedByRoot = false
+        if (rootAvailable()) {
+            val userId = DeviceToolContract.appUserId(appContext)
+            val component = launchIntent.component?.flattenToShortString()
+            if (!component.isNullOrBlank()) {
+                val cmd = "am start --user $userId --display $displayId -n ${DeviceToolContract.quote(component)}"
+                val exec = BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable)
+                try {
+                    launchedByRoot = exec.execute(cmd, timeoutMillis = 6_000L).exitCode == 0
+                } finally {
+                    exec.close()
+                }
             }
-            val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
-            appContext.startActivity(intent, options.toBundle())
-            true
-        }.getOrElse { throwable ->
-            AndroidAgentLogger.debug {
-                "Virtual display startActivity in-process fallback: type=${throwable.safeLogType()}"
-            }
-            false
         }
 
-        if (!startedInProcess || rootAvailable()) {
-            // Root 下补发一次指定 displayId 的 am start，确保后台启动限制或跨屏栈迁移生效
-            if (rootAvailable()) {
-                val userId = DeviceToolContract.appUserId(appContext)
-                val component = launchIntent.component?.flattenToShortString()
-                val cmd = if (!component.isNullOrBlank()) {
-                    "am start --user $userId --display $displayId -n ${DeviceToolContract.quote(component)}"
-                } else {
-                    "monkey -p ${DeviceToolContract.quote(packageName)} -c android.intent.category.LAUNCHER 1"
+        if (!launchedByRoot) {
+            checkCancellation()
+            val startedInProcess = runCatching {
+                val intent = Intent(launchIntent).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 }
-                if (!startedInProcess) {
-                    val exec = BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable)
-                    try {
-                        val res = exec.execute(cmd, timeoutMillis = 6_000L)
-                        if (res.exitCode != 0 && !startedInProcess) return null
-                    } finally {
-                        exec.close()
-                    }
+                val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
+                appContext.startActivity(intent, options.toBundle())
+                true
+            }.getOrElse { throwable ->
+                AndroidAgentLogger.debug {
+                    "Virtual display startActivity in-process fallback: type=${throwable.safeLogType()}"
                 }
-            } else if (!startedInProcess) {
-                return null
+                false
             }
+            if (!startedInProcess) return null
         }
 
         synchronized(lock) {
@@ -270,8 +281,11 @@ internal object VirtualDisplayController {
         intent: Intent,
         targetLabel: String,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
+        checkCancellation: () -> Unit = {},
     ): Int? {
+        checkCancellation()
         val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
+        checkCancellation()
         val appContext = context.applicationContext
         captureMainDisplayScene(intent.component?.packageName.orEmpty(), rootAvailable)
         val started = runCatching {
@@ -282,6 +296,7 @@ internal object VirtualDisplayController {
         }.getOrDefault(false)
 
         if (!started && rootAvailable()) {
+            checkCancellation()
             val uriString = intent.dataString ?: return null
             val userId = DeviceToolContract.appUserId(appContext)
             val exec = BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable)
@@ -409,8 +424,34 @@ internal object VirtualDisplayController {
     }
 
     /**
-     * 提取虚拟屏最新一帧的完整 Bitmap 副本（供 observe_screen 使用，调用方负责 recycle）。
+     * 当虚拟屏内部发生跨应用跳转（如从应用 A 跳往应用 B 或拉起授权页）时，同步更新当前虚拟屏承载的包名与应用名。
      */
+    fun onTopPackageObserved(
+        context: Context,
+        observedPackage: String,
+        rootAvailable: () -> Boolean = { RootAccess.isGranted },
+    ) {
+        val pkg = observedPackage.trim()
+        if (pkg.isBlank() || pkg == "android" || pkg == "com.android.systemui" || pkg == context.packageName) return
+        val current = synchronized(lock) { mutableSnapshots.value }
+        if (!current.active || current.packageName == pkg) return
+        val appContext = context.applicationContext
+        val resolvedName = runCatching {
+            val pm = appContext.packageManager
+            val info = pm.getApplicationInfo(pkg, 0)
+            pm.getApplicationLabel(info).toString().trim().takeIf { it.isNotBlank() }
+        }.getOrNull() ?: pkg
+        mutePackageAudioFocusIfPossible(appContext, pkg, rootAvailable)
+        synchronized(lock) {
+            val latest = mutableSnapshots.value
+            if (latest.active && latest.packageName != pkg) {
+                mutableSnapshots.value = latest.copy(
+                    packageName = pkg,
+                    appName = resolvedName,
+                )
+            }
+        }
+    }
     fun captureScreenshotBitmap(waitUpToMs: Long = 450L): Bitmap? {
         val deadline = SystemClock.elapsedRealtime() + waitUpToMs.coerceAtLeast(0L)
         while (true) {
@@ -419,7 +460,7 @@ internal object VirtualDisplayController {
                 if (bmp != null && !bmp.isRecycled) {
                     return runCatching { bmp.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
                 }
-                if (!CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId)) return null
+                if (sessionState.active == null) return null
             }
             if (SystemClock.elapsedRealtime() >= deadline) return null
             try {
@@ -543,28 +584,22 @@ internal object VirtualDisplayController {
     fun release(
         context: Context? = null,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
-    ) {
-        synchronized(lock) {
-            releaseLocked(context, rootAvailable)
-        }
-    }
+    ) = releaseSession(context, rootAvailable)
 
-    private fun releaseLocked(
+    private fun releaseSession(
         context: Context?,
         rootAvailable: () -> Boolean,
+        expected: VirtualDisplaySessionState.Token? = null,
     ) {
         context?.let { dismissReturnToLingscreen(it.applicationContext) }
-        highFrequencyPreview = false
-
-        // 先把让用户看见的界面还回去，再拆虚拟屏。
-        // 顺序很关键：DESTROY_CONTENT_ON_REMOVAL 会连任务一起销毁，
-        // 所以必须在 activeDisplayId 复位与快照清空之前完成迁移。
-        if (CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId) && adoptedPackage.isNotEmpty()) {
+        val priorDisplayId = synchronized(lock) { sessionState.active?.displayId ?: Display.DEFAULT_DISPLAY }
+        val priorAdoptedPkg = adoptedPackage
+        if (CanvasRoutingPolicy.isVirtualDisplay(priorDisplayId) && priorAdoptedPkg.isNotEmpty()) {
             runCatching {
                 moveVirtualTaskToMainDisplay(
-                    context = context?.applicationContext ?: return@runCatching,
-                    displayId = activeDisplayId,
-                    packageName = adoptedPackage,
+                    context = (context ?: lastAppContext)?.applicationContext ?: return@runCatching,
+                    displayId = priorDisplayId,
+                    packageName = priorAdoptedPkg,
                     rootAvailable = rootAvailable,
                 )
             }
@@ -573,63 +608,29 @@ internal object VirtualDisplayController {
         restoreFocusTaskId = Display.INVALID_DISPLAY
         adoptedPackage = ""
 
-        activeDisplayId = Display.DEFAULT_DISPLAY
-        mutableSnapshots.value = VirtualDisplaySnapshot.Inactive
-
-        // 焦点还原放在状态复位之后：用户看到的是原来的界面，而不是空画布。
+        val resources = synchronized(lock) {
+            if (expected != null && !sessionState.isCurrent(expected)) return
+            sessionState.invalidate()
+            highFrequencyPreview = false
+            mutableSnapshots.value = VirtualDisplaySnapshot.Inactive
+            if (context != null && mutedPackages.isNotEmpty()) {
+                restoreMutedPackages(context.applicationContext, rootAvailable)
+            } else {
+                mutedPackages.clear()
+            }
+            val detached = displayResources
+            displayResources = null
+            latestFullBitmap?.let { if (!it.isRecycled) it.recycle() }
+            latestFullBitmap = null
+            lastUiFrameAtElapsedMs = 0L
+            detached
+        }
         if (pendingFocus != Display.INVALID_DISPLAY) {
             restoreMainFocus(pendingFocus)
         }
-
-        if (context != null && mutedPackages.isNotEmpty()) {
-            restoreMutedPackages(context.applicationContext, rootAvailable)
-        } else {
-            mutedPackages.clear()
+        if (resources != null) {
+            thread(name = "eta-vd-cleanup", isDaemon = true) { resources.close() }
         }
-
-        inProcessVirtualDisplay?.let { vd ->
-            runCatching { vd.release() }
-        }
-        inProcessVirtualDisplay = null
-
-        val bridge = rootBridgeProcess
-        val supervisor = processSupervisor
-        rootBridgeProcess = null
-        processSupervisor = null
-        if (bridge != null) {
-            thread(name = "eta-vd-bridge-cleanup", isDaemon = true) {
-                runCatching {
-                    bridge.outputStream.write("release\n".toByteArray(Charsets.UTF_8))
-                    bridge.outputStream.flush()
-                    bridge.outputStream.close()
-                }
-                if (supervisor != null) {
-                    supervisor.beginClosing()
-                    if (bridge.isAlive) supervisor.terminateAndReap(bridge) else supervisor.reapProcess(bridge)
-                    supervisor.unregisterProcess(bridge)
-                } else {
-                    runCatching { bridge.destroyForcibly() }
-                }
-            }
-        }
-
-        imageReader?.let { reader ->
-            runCatching { reader.setOnImageAvailableListener(null, null) }
-            runCatching { reader.close() }
-        }
-        imageReader = null
-
-        frameThread?.let { thread ->
-            runCatching { thread.quitSafely() }
-        }
-        frameThread = null
-        frameHandler = null
-
-        latestFullBitmap?.let { bmp ->
-            if (!bmp.isRecycled) bmp.recycle()
-        }
-        latestFullBitmap = null
-        lastUiFrameAtElapsedMs = 0L
     }
 
 
@@ -786,7 +787,7 @@ internal object VirtualDisplayController {
             val bitmap = decodeImageToBitmap(image) ?: return
             var oldBitmap: Bitmap? = null
             synchronized(lock) {
-                if (!CanvasRoutingPolicy.isVirtualDisplay(activeDisplayId)) {
+                if (sessionState.active == null || displayResources?.reader !== reader) {
                     bitmap.recycle()
                     return
                 }
@@ -818,6 +819,21 @@ internal object VirtualDisplayController {
         val width = image.width
         val height = image.height
         if (width <= 0 || height <= 0) return null
+
+        // 优先直接通过 HardwareBuffer 映射，避免不同 ROM Gralloc 行尾 padding 差异导致的 BufferUnderflowException
+        runCatching {
+            image.hardwareBuffer?.use { hb ->
+                val wrapped = Bitmap.wrapHardwareBuffer(hb, ColorSpace.get(ColorSpace.Named.SRGB))
+                if (wrapped != null) {
+                    try {
+                        return wrapped.copy(Bitmap.Config.ARGB_8888, false)
+                    } finally {
+                        if (!wrapped.isRecycled) wrapped.recycle()
+                    }
+                }
+            }
+        }
+
         val plane = image.planes.firstOrNull() ?: return null
         val buffer = plane.buffer ?: return null
         buffer.rewind()
@@ -828,12 +844,20 @@ internal object VirtualDisplayController {
         val paddedWidth = width + rowPadding / pixelStride
         if (paddedWidth < width) return null
 
-        val rawBitmap = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
+        val requiredBytes = paddedWidth * height * 4
+        val safeHeight = if (buffer.remaining() >= requiredBytes) {
+            height
+        } else {
+            (buffer.remaining() / (paddedWidth * 4)).coerceAtMost(height)
+        }
+        if (safeHeight <= 0) return null
+
+        val rawBitmap = Bitmap.createBitmap(paddedWidth, safeHeight, Bitmap.Config.ARGB_8888)
         rawBitmap.copyPixelsFromBuffer(buffer)
-        return if (paddedWidth == width) {
+        return if (paddedWidth == width && safeHeight == height) {
             rawBitmap
         } else {
-            val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, height)
+            val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, safeHeight)
             rawBitmap.recycle()
             cropped
         }
@@ -884,85 +908,6 @@ internal object VirtualDisplayController {
             )
         }
     }.getOrNull()
-
-    private fun tryCreateRootBridgedVirtualDisplay(
-        appContext: Context,
-        surface: android.view.Surface,
-        width: Int,
-        height: Int,
-        densityDpi: Int,
-        rootAvailable: () -> Boolean,
-    ): Int? {
-        val token = VirtualDisplaySurfaceRegistry.register(surface)
-        val supervisor = ShellProcessSupervisor(rootAvailable = rootAvailable)
-        val apkPath = appContext.applicationInfo.sourceDir
-        val cmd = "CLASSPATH=${DeviceToolContract.quote(apkPath)} app_process /system/bin " +
-            "io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayCommandMain"
-        val process = supervisor.startShellProcess("root", cmd, mergeStderr = true)
-        if (process == null) {
-            VirtualDisplaySurfaceRegistry.unregister(token)
-            return null
-        }
-
-        val readyLatch = CountDownLatch(1)
-        var resolvedDisplayId: Int? = null
-        val payload = JSONObject()
-            .put("action", "hold_display")
-            .put("user_id", DeviceToolContract.appUserId(appContext))
-            .put("surface_token", token)
-            .put("width", width)
-            .put("height", height)
-            .put("density_dpi", densityDpi)
-            .toString() + "\n"
-
-        thread(name = "eta-vd-bridge-stdout", isDaemon = true) {
-            runCatching {
-                BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8)).use { reader ->
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        if (line.startsWith(VirtualDisplayCommandMain.READY_PREFIX)) {
-                            resolvedDisplayId = line
-                                .removePrefix(VirtualDisplayCommandMain.READY_PREFIX)
-                                .trim()
-                                .toIntOrNull()
-                            readyLatch.countDown()
-                        } else if (line.startsWith(VirtualDisplayCommandMain.RESULT_PREFIX)) {
-                            readyLatch.countDown()
-                        }
-                    }
-                }
-            }
-            readyLatch.countDown()
-        }
-
-        val written = runCatching {
-            process.outputStream.write(payload.toByteArray(Charsets.UTF_8))
-            process.outputStream.flush()
-            true
-        }.getOrDefault(false)
-
-        if (!written) {
-            VirtualDisplaySurfaceRegistry.unregister(token)
-            supervisor.beginClosing()
-            supervisor.terminateAndReap(process)
-            supervisor.unregisterProcess(process)
-            return null
-        }
-
-        val awaited = runCatching { readyLatch.await(4, TimeUnit.SECONDS) }.getOrDefault(false)
-        val id = resolvedDisplayId
-        if (!awaited || id == null || !CanvasRoutingPolicy.isVirtualDisplay(id)) {
-            VirtualDisplaySurfaceRegistry.unregister(token)
-            supervisor.beginClosing()
-            if (process.isAlive) supervisor.terminateAndReap(process) else supervisor.reapProcess(process)
-            supervisor.unregisterProcess(process)
-            return null
-        }
-
-        rootBridgeProcess = process
-        processSupervisor = supervisor
-        return id
-    }
 
     private fun moveVirtualTaskToMainDisplay(
         context: Context,
