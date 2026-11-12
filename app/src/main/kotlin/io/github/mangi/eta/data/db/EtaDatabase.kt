@@ -200,6 +200,20 @@ internal abstract class EtaDatabase : RoomDatabase() {
                     if (!hasPinned) {
                         database.execSQL("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
                     }
+                    val existingMsgCols = mutableSetOf<String>()
+                    database.rawQuery("PRAGMA table_info(conversation_messages)", null).use { cursor ->
+                        val nameIndex = cursor.getColumnIndex("name")
+                        while (cursor.moveToNext()) {
+                            if (nameIndex >= 0) cursor.getString(nameIndex)?.let(existingMsgCols::add)
+                        }
+                    }
+                    listOf(
+                        "step_count", "llm_ms", "tool_ms", "ttft_ms", "ttft_steps", "decode_ms", "decode_tokens"
+                    ).forEach { col ->
+                        if (col !in existingMsgCols) {
+                            database.execSQL("ALTER TABLE conversation_messages ADD COLUMN $col INTEGER")
+                        }
+                    }
                     val tables = mutableSetOf<String>()
                     database.rawQuery(
                         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN " +
@@ -214,10 +228,16 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         database.execSQL(CREATE_CATEGORY_MEMBERS_INDEX)
                     }
                     if (version < 25) database.version = 25
+                    database.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+                    database.execSQL(
+                        "INSERT OR REPLACE INTO room_master_table (id,identity_hash) " +
+                            "VALUES(42, '$SCHEMA_25_IDENTITY_HASH')",
+                    )
                 }
             }
         }
 
+        private const val SCHEMA_25_IDENTITY_HASH = "0bb9c2217d13d7989fa85ff5699f43a1"
         private const val DATABASE_VERSION_WITH_CATEGORIES = 24
 
         private const val CREATE_CATEGORIES =
