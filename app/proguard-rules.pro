@@ -73,3 +73,8 @@
 -keep class io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayCommandMain {
     public static void main(java.lang.String[]);
 }
+
+# ── 本分支反射与动态调用保护规则（Release 完整优化安全） ──────────────────────
+-keep class io.github.mangi.eta.agent.breeno.** { *; }
+-keep class io.github.mangi.eta.hook.** { *; }
+-dontwarn org.lsposed.hiddenapibypass.**
